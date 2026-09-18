@@ -24,7 +24,7 @@ case "$variant" in
   *v) flash_mode=dout ;;
   *) flash_mode=dio ;;
 esac
-target=target/xtensa-esp32s3-espidf/$profile
+target=${CARGO_TARGET_DIR:-target}/xtensa-esp32s3-espidf/$profile
 py=$(ls -d .embuild/espressif/python_env/*/bin/python | head -1)
 idf=.embuild/espressif/esp-idf/v5.3.3
 mkdir -p "$out"
