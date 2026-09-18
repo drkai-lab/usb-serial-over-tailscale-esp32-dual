@@ -57,6 +57,8 @@ const K_HOST: &str = "hostname";
 const K_PORT: &str = "tcp_port";
 const K_BAUD: &str = "baud_rate";
 const K_USBIF: &str = "usb_if";
+const K_USBIF2: &str = "usb_if2";
+const K_PORT2: &str = "tcp_port2";
 const K_USBDRV: &str = "usb_drv";
 
 const ALL_KEYS: &[&str] = &[
@@ -68,6 +70,8 @@ const ALL_KEYS: &[&str] = &[
     K_PORT,
     K_BAUD,
     K_USBIF,
+    K_USBIF2,
+    K_PORT2,
     K_USBDRV,
     tsnode::node::KEY_MACHINE,
     tsnode::node::KEY_NODE,
@@ -123,6 +127,8 @@ pub fn load_config(store: &dyn Store) -> Option<SavedConfig> {
         tcp_port: store.get(K_PORT).and_then(|p| p.parse().ok()),
         baud_rate: store.get(K_BAUD).and_then(|b| b.parse().ok()),
         usb_interface: store.get(K_USBIF).and_then(|i| i.parse().ok()),
+        usb_interface2: store.get(K_USBIF2).and_then(|i| i.parse().ok()),
+        tcp_port2: store.get(K_PORT2).and_then(|p| p.parse().ok()),
         usb_driver: store.get(K_USBDRV).filter(|d| !d.is_empty()),
     })
 }
@@ -155,6 +161,16 @@ pub fn save_config(store: &dyn Store, cfg: &SavedConfig) -> std::io::Result<()> 
         store,
         K_USBIF,
         cfg.usb_interface.map(|i| i.to_string()).as_deref(),
+    )?;
+    set_or_remove(
+        store,
+        K_USBIF2,
+        cfg.usb_interface2.map(|i| i.to_string()).as_deref(),
+    )?;
+    set_or_remove(
+        store,
+        K_PORT2,
+        cfg.tcp_port2.map(|p| p.to_string()).as_deref(),
     )?;
     set_or_remove(store, K_USBDRV, cfg.usb_driver.as_deref())?;
     if identity_changed {

@@ -35,6 +35,11 @@ pub struct SavedConfig {
     /// USB interface index of the target's console (devices such as the
     /// Raspberry Pi Debug Probe expose the UART on interface 1).
     pub usb_interface: Option<u8>,
+    /// A second channel, for a device with more than one serial interface (an
+    /// FT4232H has four). `None` in either field leaves it off; the two ports
+    /// must differ.
+    pub usb_interface2: Option<u8>,
+    pub tcp_port2: Option<u16>,
     /// Forced USB serial driver name (`cdc`, `ftdi`, `cp210x`, `ch34x`);
     /// `None` auto-detects from the device's vendor and product ID.
     pub usb_driver: Option<String>,
@@ -308,6 +313,21 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
                 Some(i) => self.set_field(|c| c.usb_interface = Some(i)),
                 _ => self.line("usage: usbif <interface index> (0 is the first CDC interface; the Raspberry Pi Debug Probe's UART is 1)"),
             },
+            "usbif2" => match args.first().copied() {
+                Some("off") => self.set_field(|c| {
+                    c.usb_interface2 = None;
+                    c.tcp_port2 = None;
+                }),
+                Some(i) => match i.parse::<u8>() {
+                    Ok(i) => self.set_field(|c| c.usb_interface2 = Some(i)),
+                    Err(_) => self.line("usage: usbif2 <interface index|off>"),
+                },
+                None => self.line("usage: usbif2 <interface index|off>  (second channel; set port2 as well)"),
+            },
+            "port2" => match args.first().and_then(|p| p.parse::<u16>().ok()) {
+                Some(p) if p != 0 => self.set_field(|c| c.tcp_port2 = Some(p)),
+                _ => self.line("usage: port2 <1-65535>  (second channel; set usbif2 as well)"),
+            },
             "baud" => match args.first().and_then(|b| b.parse::<u32>().ok()) {
                 Some(b) if b != 0 => self.set_field(|c| c.baud_rate = Some(b)),
                 _ => self.line("usage: baud <rate>"),
@@ -350,6 +370,8 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
             "port <n>           TCP port of the serial bridge (default 35932)",
             "baud <rate>        USB serial baud rate (default 115200)",
             "usbif <n>          USB interface of the target console (default 0; Debug Probe UART is 1)",
+            "usbif2 <n|off>     second channel's USB interface (a multi-port FTDI has one per UART)",
+            "port2 <n>          second channel's TCP port (needs usbif2; must differ from port)",
             "usbdrv <name>      force the USB serial driver (auto/cdc/ftdi/cp210x/ch34x)",
             "reset              erase configuration and identity",
             "reboot             restart",
@@ -400,6 +422,9 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
                 c.usb_driver.as_deref().unwrap_or("auto"),
                 if c.auth_key.is_some() { "set" } else { "none" }
             ));
+            if let (Some(i), Some(p)) = (c.usb_interface2, c.tcp_port2) {
+                self.line(&format!("Channel 2: port={p} usbif={i}"));
+            }
         } else {
             self.line("Config:    none");
         }
@@ -822,5 +847,55 @@ mod tests {
             read_line(&mut con, true, Some(Duration::from_millis(1)), &mut false),
             None
         );
+    }
+
+    #[test]
+    fn second_channel_is_configured_as_a_pair() {
+        let plat = FakePlatform::default();
+        let mut con = FakeConsole {
+            input: b"usbif 3
+usbif2 2
+port2 35933
+status
+"
+            .to_vec()
+            .into(),
+            output: String::new(),
+            strict: true,
+        };
+        {
+            let mut sh = Shell::new(&mut con, &plat);
+            for _ in 0..4 {
+                let cmd = read_line(sh.console, true, None, &mut sh.swallow_lf).unwrap();
+                sh.dispatch(&cmd);
+            }
+        }
+        let cfg = plat.config().unwrap();
+        assert_eq!(cfg.usb_interface, Some(3));
+        assert_eq!(cfg.usb_interface2, Some(2));
+        assert_eq!(cfg.tcp_port2, Some(35933));
+        assert!(con.output.contains("Channel 2: port=35933 usbif=2"));
+
+        // "off" takes the whole channel away, port included.
+        let mut con = FakeConsole {
+            input: b"usbif2 off
+status
+"
+            .to_vec()
+            .into(),
+            output: String::new(),
+            strict: true,
+        };
+        {
+            let mut sh = Shell::new(&mut con, &plat);
+            for _ in 0..2 {
+                let cmd = read_line(sh.console, true, None, &mut sh.swallow_lf).unwrap();
+                sh.dispatch(&cmd);
+            }
+        }
+        let cfg = plat.config().unwrap();
+        assert_eq!(cfg.usb_interface2, None);
+        assert_eq!(cfg.tcp_port2, None);
+        assert!(!con.output.contains("Channel 2:"));
     }
 }

@@ -159,11 +159,22 @@ pub struct UsbSerial {
     inner: Arc<Inner>,
 }
 
-// Shared with the C callbacks (there is exactly one USB host instance).
-static INSTANCE: Mutex<Option<Arc<Inner>>> = Mutex::new(None);
+// Every channel that has been started. The per-device callbacks find their own
+// through the open call's user_arg; this list is for new_dev_cb, which the CDC
+// driver calls once per device rather than once per open.
+static INSTANCES: Mutex<Vec<Arc<Inner>>> = Mutex::new(Vec::new());
 
-unsafe extern "C" fn data_cb(data: *const u8, len: usize, _user: *mut c_void) -> bool {
-    if let Some(inner) = INSTANCE.lock().unwrap().as_ref() {
+/// The channel a callback belongs to, from the `user_arg` given at open time.
+///
+/// # Safety
+/// `user` is the `Arc<Inner>` pointer passed to `cdc_acm_host_open_v2`, and the
+/// `Arc` it points into is kept alive in `INSTANCES` for the program's life.
+unsafe fn inner_of<'a>(user: *mut c_void) -> Option<&'a Inner> {
+    (!user.is_null()).then(|| &*(user as *const Inner))
+}
+
+unsafe extern "C" fn data_cb(data: *const u8, len: usize, user: *mut c_void) -> bool {
+    if let Some(inner) = inner_of(user) {
         let raw = std::slice::from_raw_parts(data, len);
         // FTDI prefixes every IN packet with two status bytes (modem, line).
         let stripped: Vec<u8>;
@@ -195,13 +206,13 @@ unsafe extern "C" fn data_cb(data: *const u8, len: usize, _user: *mut c_void) ->
 
 unsafe extern "C" fn event_cb(
     event: *const usb::cdc_acm_host_dev_event_data_t,
-    _user: *mut c_void,
+    user: *mut c_void,
 ) {
     let ev = &*event;
     match ev.type_ {
         usb::cdc_acm_host_dev_event_t_CDC_ACM_HOST_DEVICE_DISCONNECTED => {
             info!("usb: device disconnected");
-            if let Some(inner) = INSTANCE.lock().unwrap().as_ref() {
+            if let Some(inner) = inner_of(user) {
                 let mut d = inner.dev.lock().unwrap();
                 inner.attached.store(false, Ordering::SeqCst);
                 if let Some(h) = d.handle.take() {
@@ -232,7 +243,7 @@ unsafe extern "C" fn new_dev_cb(dev: usb::usb_device_handle_t) {
         let d = &(*desc).__bindgen_anon_1;
         let (vid, pid, bcd, class) = (d.idVendor, d.idProduct, d.bcdDevice, d.bDeviceClass);
         info!("usb: new device VID {vid:04x} PID {pid:04x} rev {bcd:04x} class {class:02x}");
-        if let Some(inner) = INSTANCE.lock().unwrap().as_ref() {
+        for inner in INSTANCES.lock().unwrap().iter() {
             inner.vid.store(vid as u32, Ordering::Relaxed);
             inner.pid.store(pid as u32, Ordering::Relaxed);
             inner.bcd_device.store(bcd as u32, Ordering::Relaxed);
@@ -249,6 +260,9 @@ fn esp_check(rc: sys::esp_err_t, what: &str) -> Result<()> {
 }
 
 impl UsbSerial {
+    /// Start one channel: an interface of the attached device, bridged on its
+    /// own TCP port. The USB host library and the CDC driver are installed by
+    /// the first call and shared by the rest.
     pub fn start(baud: u32, interface: u8, forced: Option<Driver>) -> Result<Self> {
         let inner = Arc::new(Inner {
             dev: Mutex::new(DevState {
@@ -267,41 +281,48 @@ impl UsbSerial {
             driver: Mutex::new(Driver::Cdc),
             forced,
         });
-        *INSTANCE.lock().unwrap() = Some(inner.clone());
+        let first = {
+            let mut list = INSTANCES.lock().unwrap();
+            list.push(inner.clone());
+            list.len() == 1
+        };
 
-        unsafe {
-            let mut host_cfg: usb::usb_host_config_t = core::mem::zeroed();
-            host_cfg.intr_flags = sys::ESP_INTR_FLAG_LEVEL1 as i32;
-            esp_check(usb::usb_host_install(&host_cfg), "usb_host_install")?;
-        }
-        // USB host library event pump.
-        std::thread::Builder::new()
-            .name("usb-events".into())
-            .stack_size(4 * 1024)
-            .spawn(|| unsafe {
-                loop {
-                    let mut flags: u32 = 0;
-                    usb::usb_host_lib_handle_events(u32::MAX, &mut flags);
-                    if flags & usb::USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS != 0 {
-                        usb::usb_host_device_free_all();
+        if first {
+            unsafe {
+                let mut host_cfg: usb::usb_host_config_t = core::mem::zeroed();
+                host_cfg.intr_flags = sys::ESP_INTR_FLAG_LEVEL1 as i32;
+                esp_check(usb::usb_host_install(&host_cfg), "usb_host_install")?;
+            }
+            // USB host library event pump.
+            std::thread::Builder::new()
+                .name("usb-events".into())
+                .stack_size(4 * 1024)
+                .spawn(|| unsafe {
+                    loop {
+                        let mut flags: u32 = 0;
+                        usb::usb_host_lib_handle_events(u32::MAX, &mut flags);
+                        if flags & usb::USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS != 0 {
+                            usb::usb_host_device_free_all();
+                        }
                     }
-                }
-            })?;
-        unsafe {
-            let mut drv: usb::cdc_acm_host_driver_config_t = core::mem::zeroed();
-            // The data callback runs on this task (FTDI status stripping,
-            // queue locking, logging), so give it room.
-            drv.driver_task_stack_size = 8192;
-            drv.driver_task_priority = 10;
-            drv.xCoreID = 0;
-            drv.new_dev_cb = Some(new_dev_cb);
-            esp_check(usb::cdc_acm_host_install(&drv), "cdc_acm_host_install")?;
+                })?;
+            unsafe {
+                let mut drv: usb::cdc_acm_host_driver_config_t = core::mem::zeroed();
+                // The data callback runs on this task (FTDI status stripping,
+                // queue locking, logging), so give it room.
+                drv.driver_task_stack_size = 8192;
+                drv.driver_task_priority = 10;
+                drv.xCoreID = 0;
+                drv.new_dev_cb = Some(new_dev_cb);
+                esp_check(usb::cdc_acm_host_install(&drv), "cdc_acm_host_install")?;
+            }
+            info!("usb: host installed, waiting for a CDC-ACM device");
         }
-        info!("usb: host installed, waiting for a CDC-ACM device");
+        info!("usb: channel on interface {interface} at {baud} baud");
         let serial = UsbSerial { inner };
         let s = serial.clone();
         std::thread::Builder::new()
-            .name("usb-open".into())
+            .name(format!("usb-open{interface}"))
             .stack_size(6 * 1024)
             .spawn(move || s.open_loop())?;
         Ok(serial)
@@ -343,7 +364,8 @@ impl UsbSerial {
             cfg.in_buffer_size = IN_BUFFER;
             cfg.event_cb = Some(event_cb);
             cfg.data_cb = Some(data_cb);
-            cfg.user_arg = core::ptr::null_mut();
+            // The callbacks get the channel back through this.
+            cfg.user_arg = Arc::as_ptr(&self.inner) as *mut c_void;
             let mut hdl: usb::cdc_acm_dev_hdl_t = core::ptr::null_mut();
             let rc = usb::cdc_acm_host_open_v2(&cfg, &mut hdl);
             if rc != sys::ESP_OK {

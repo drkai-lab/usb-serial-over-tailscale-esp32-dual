@@ -139,6 +139,7 @@ The main commands are listed below; `help` prints the full list.
 | `usbif <n>` | USB interface number of the target. The UART of a Raspberry Pi Debug Probe is 1; the Verdin console on a Toradex Dahlia is 3. |
 | `usbdrv <auto\|cdc\|ftdi\|cp210x\|ch34x>` | USB-serial bridge chip. The default detects it from VID and PID. |
 | `port <n>`, `baud <rate>` | TCP port of the bridge (default 35932, "ESP32" with E=3, S=5, P=9) and baud rate of the target (default 115200). |
+| `usbif2 <n\|off>`, `port2 <n>` | A second channel on another interface of the same device, on its own TCP port. Both are needed; `usbif2 off` removes the channel. |
 | `status`, `reset`, `reboot` | Show status, erase configuration and keys, reboot. |
 
 The same shell is always available on the UART port (115200 bps, shared with the log).
@@ -154,11 +155,25 @@ socat -,rawer,escape=0x1d TCP:target-console:35932   # Ctrl-] to exit
 nc target-console 35932
 ```
 
-One connection at a time is served.
+One connection at a time is served per channel.
 A second connection while one is active receives `busy` and is closed.
 A peer that stops responding is dropped after 120 seconds and the next connection is accepted.
 Bytes flow unchanged in both directions; there is no protocol on top.
 The baud rate is set on the adapter and cannot be changed by the client.
+
+A device with several serial interfaces can be bridged twice.
+A Toradex Dahlia carrier has an FT4232H whose interface 3 is the Verdin console and interface 2 the MCU console, so
+
+```
+usbif 3
+usbif2 2
+port2 35933
+reboot
+```
+
+serves the first console on port 35932 and the second on 35933.
+The two channels are independent: each has its own USB interface, its own TCP port and its own busy state.
+They share one USB device, one baud rate and one tailnet address.
 
 ### Power and wiring
 

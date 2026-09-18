@@ -3,6 +3,10 @@
 //!
 //! Accepting runs on its own thread so that a second client is told the
 //! bridge is busy right away instead of waiting in the backlog.
+//!
+//! One bridge serves one channel. A device with several serial interfaces (an
+//! FT4232H has four) has one bridge per interface, each on its own port, and
+//! "busy" is per bridge: a client on one port does not block the other.
 
 use crate::usb_host::UsbSerial;
 use anyhow::{anyhow, Result};
@@ -14,22 +18,22 @@ use std::time::Duration;
 use tsnode::netstack::TcpStream;
 use tsnode::node::Node;
 
-static BUSY: AtomicBool = AtomicBool::new(false);
-
 pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
     let listener = node.listen(port);
     info!("bridge: listening on tailnet port {port}");
+    let busy = Arc::new(AtomicBool::new(false));
+    let accept_busy = busy.clone();
     let (tx, rx) = mpsc::sync_channel::<TcpStream>(1);
     crate::platform::spawn_thread(
-        "bridge-accept",
+        &format!("bridge-accept{port}"),
         6 * 1024,
         true,
         Box::new(move || loop {
             let Some(conn) = listener.accept(Duration::from_secs(1)) else {
                 continue;
             };
-            if BUSY.swap(true, Ordering::SeqCst) {
-                warn!("bridge: rejecting {} (busy)", conn.peer_addr());
+            if accept_busy.swap(true, Ordering::SeqCst) {
+                warn!("bridge: rejecting {} on {port} (busy)", conn.peer_addr());
                 let _ = conn.write_all(b"busy: another client is connected\r\n");
                 conn.close();
                 continue;
@@ -44,7 +48,7 @@ pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
             .recv()
             .map_err(|_| anyhow!("bridge: accept thread exited"))?;
         serve(&serial, conn)?;
-        BUSY.store(false, Ordering::SeqCst);
+        busy.store(false, Ordering::SeqCst);
     }
 }
 

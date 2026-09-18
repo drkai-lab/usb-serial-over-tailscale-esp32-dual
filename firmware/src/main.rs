@@ -102,10 +102,36 @@ fn main() -> Result<()> {
             .and_then(|c| c.usb_driver.as_deref())
             .and_then(usb_host::Driver::parse)
             .flatten();
-        (
-            Some(usb_host::UsbSerial::start(baud, iface, forced).context("usb host")?),
-            None,
-        )
+        // The second channel, if the configuration has both halves of it and
+        // its port and interface differ from the first.
+        let second = match (
+            config.as_ref().and_then(|c| c.usb_interface2),
+            config.as_ref().and_then(|c| c.tcp_port2),
+        ) {
+            (Some(i2), Some(p2)) if i2 != iface => Some((i2, p2)),
+            (Some(i2), Some(_)) => {
+                warn!("usb: ignoring channel 2, interface {i2} is the first one");
+                None
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                warn!("usb: channel 2 needs both usbif2 and port2");
+                None
+            }
+            (None, None) => None,
+        };
+        let first_serial = usb_host::UsbSerial::start(baud, iface, forced).context("usb host")?;
+        let second_serial = match second {
+            Some((i2, p2)) => Some((
+                usb_host::UsbSerial::start(baud, i2, forced).context("usb host (channel 2)")?,
+                p2,
+            )),
+            None => None,
+        };
+        (Some((first_serial, second_serial)), None)
+    };
+    let (serial, serial2) = match serial {
+        Some((s, s2)) => (Some(s), s2),
+        None => (None, None),
     };
 
     let platform = Arc::new(platform::EspPlatform {
@@ -173,6 +199,23 @@ fn main() -> Result<()> {
             .as_ref()
             .and_then(|c| c.tcp_port)
             .unwrap_or(DEFAULT_TCP_PORT);
+        if let Some((serial2, port2)) = serial2 {
+            if port2 == port {
+                warn!("bridge: channel 2 wants port {port2}, which channel 1 has; not started");
+            } else {
+                let node2 = node.clone();
+                platform::spawn_thread(
+                    "bridge2",
+                    8 * 1024,
+                    true,
+                    Box::new(move || {
+                        if let Err(e) = bridge::run(node2, serial2, port2) {
+                            warn!("bridge: channel 2 stopped: {e:#}");
+                        }
+                    }),
+                )?;
+            }
+        }
         bridge::run(node, serial, port)
     } else {
         info!("setup: open the USB serial port (or press Enter on UART0) to configure");
