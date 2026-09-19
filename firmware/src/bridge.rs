@@ -47,15 +47,15 @@ pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
         let conn = rx
             .recv()
             .map_err(|_| anyhow!("bridge: accept thread exited"))?;
-        serve(&serial, conn)?;
+        serve(&serial, conn, port)?;
         busy.store(false, Ordering::SeqCst);
     }
 }
 
 /// Runs one client session until either side closes.
-fn serve(serial: &UsbSerial, conn: TcpStream) -> Result<()> {
+fn serve(serial: &UsbSerial, conn: TcpStream, port: u16) -> Result<()> {
     let peer = conn.peer_addr();
-    info!("bridge: client connected from {peer}");
+    info!("bridge: client connected from {peer} on {port}");
     let conn = Arc::new(conn);
     let serial2 = serial.clone();
     let c2 = conn.clone();
@@ -65,7 +65,7 @@ fn serve(serial: &UsbSerial, conn: TcpStream) -> Result<()> {
     let rx_done = Arc::new(AtomicBool::new(false));
     let rx_done2 = rx_done.clone();
     crate::platform::spawn_thread(
-        "bridge-rx",
+        &format!("bridge-rx{port}"),
         6 * 1024,
         true,
         Box::new(move || {
@@ -107,6 +107,6 @@ fn serve(serial: &UsbSerial, conn: TcpStream) -> Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
     conn.close();
-    info!("bridge: client {peer} disconnected");
+    info!("bridge: client {peer} on {port} disconnected");
     Ok(())
 }
