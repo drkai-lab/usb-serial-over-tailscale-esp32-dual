@@ -108,6 +108,11 @@ CI（GitHub Actions）は push のたびに全型番をビルドし、`v*` タ�
 screen /dev/ttyACM0 115200
 ```
 
+DTR と RTS は、端末が開いたときの状態、つまり両方アサートのままにすること。
+このポートでは2本がチップのリセットとブートのピンにつながっていて、別々に動かすと
+ROM のダウンロードモードに入ってしまい、無言のまま何も返さなくなる。
+スクリプトから覗くときは `espflash monitor --port /dev/ttyACM0` が安全である。
+
 ```text
 usb-serial-over-tailscale 0.1.0 - setup mode
 Press Enter to start setup, or type a command:

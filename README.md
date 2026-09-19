@@ -108,6 +108,12 @@ Open it in a terminal and press Enter to start the wizard.
 screen /dev/ttyACM0 115200
 ```
 
+Leave DTR and RTS as a terminal leaves them, both asserted.
+On this port they are wired to the chip's reset and boot pins, so a tool that
+drives them apart resets the board into the ROM download mode, where it goes
+quiet and answers nothing. `espflash monitor --port /dev/ttyACM0` is the safe
+way to watch the port from a script.
+
 ```text
 usb-serial-over-tailscale 0.1.0 - setup mode
 Press Enter to start setup, or type a command:
