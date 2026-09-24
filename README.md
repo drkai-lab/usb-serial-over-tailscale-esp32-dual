@@ -7,7 +7,7 @@ An ESP32-S3 board with PSRAM that joins a tailnet on its own and bridges the USB
 ![A laptop reaches the target board's serial console through Tailscale; the ESP32-S3 is powered from a USB charger and plugged into the target's USB port](web/overview.webp)
 
 ```text
-Remote PC ──Tailscale / TCP:35932──▶ ESP32-S3 ──USB host──▶ serial console of the target SBC
+Remote PC ──Tailscale / TCP:35930+n──▶ ESP32-S3 ──USB host──▶ serial interface n of the target SBC
 ```
 
 Everything a Tailscale node needs (control protocol, WireGuard, DERP, NAT traversal) is implemented in Rust in this repository.
@@ -39,7 +39,8 @@ PSRAM is required: network thread stacks and TLS buffers live there.
 | N16R8 | 16 MB | 8 MB octal | `partitions.csv` (6 MB app) | tested |
 | N8R8 | 8 MB | 8 MB octal | `partitions.csv` | built, untested |
 | N4R8 | 4 MB | 8 MB octal | `partitions-4m.csv` (3 MB app) | built, untested |
-| N16R2, N8R2, N4R2 | 16, 8, 4 MB | 2 MB quad | as above | built, untested |
+| N8R2 | 8 MB | 2 MB quad | `partitions.csv` | tested |
+| N16R2, N4R2 | 16, 4 MB | 2 MB quad | as above | built, untested |
 | WROOM-2 N16R8V, N32R8V | 16, 32 MB octal | 8 MB octal | `partitions.csv` | built, untested |
 | N4, N8, N16 (no PSRAM) | | none | | not supported |
 
@@ -142,10 +143,8 @@ The main commands are listed below; `help` prints the full list.
 | --- | --- |
 | `wifi <ssid> <pw>` | Add a Wi-Fi network and connect. Several can be stored; the strongest known AP is chosen at boot and on reconnect. |
 | `wifi list`, `wifi forget <ssid>` | List and remove stored networks. |
-| `usbif <n>` | USB interface number of the target. The UART of a Raspberry Pi Debug Probe is 1; the Verdin console on a Toradex Dahlia is 3. |
 | `usbdrv <auto\|cdc\|ftdi\|cp210x\|ch34x>` | USB-serial bridge chip. The default detects it from VID and PID. |
-| `port <n>`, `baud <rate>` | TCP port of the bridge (default 35932, "ESP32" with E=3, S=5, P=9) and baud rate of the target (default 115200). |
-| `usbif2 <n\|off>`, `port2 <n>` | A second channel on another interface of the same device, on its own TCP port. Both are needed; `usbif2 off` removes the channel. |
+| `port <n>`, `baud <rate>` | First TCP port (default 35930; USB interface n of the target is served on port+n) and baud rate of the target (default 115200). |
 | `status`, `reset`, `reboot` | Show status, erase configuration and keys, reboot. |
 
 The same shell is always available on the UART port (115200 bps, shared with the log).
@@ -154,32 +153,34 @@ Holding BOOT while powering on enters setup mode again.
 
 ### Connecting
 
-From any machine on the tailnet, open a raw TCP connection to port 35932 of the hostname or tailnet address.
+Every serial interface of the target is served on its own TCP port: the first port (35930 unless `port` changed it) plus the USB interface number.
+Which interfaces those are is read from the device when it is plugged in, so nothing has to be configured.
+
+| Target | Interface | Port |
+| --- | --- | --- |
+| A plain CDC-ACM console (one function) | 0 | 35930 |
+| Raspberry Pi Debug Probe (interface 0 is CMSIS-DAP) | 1 | 35931 |
+| Toradex Dahlia, MCU console (FT4232H port C) | 2 | 35932 |
+| Toradex Dahlia, Verdin console (FT4232H port D) | 3 | 35933 |
+
+From any machine on the tailnet, open a raw TCP connection to that port of the hostname or tailnet address.
 
 ```bash
-socat -,rawer,escape=0x1d TCP:target-console:35932   # Ctrl-] to exit
-nc target-console 35932
+socat -,rawer,escape=0x1d TCP:target-console:35933   # Ctrl-] to exit
+nc target-console 35933
 ```
 
-One connection at a time is served per channel.
+One connection at a time is served per port.
 A second connection while one is active receives `busy` and is closed.
 A peer that stops responding is dropped after 120 seconds and the next connection is accepted.
 Bytes flow unchanged in both directions; there is no protocol on top.
 The baud rate is set on the adapter and cannot be changed by the client.
 
-A device with several serial interfaces can be bridged twice.
-A Toradex Dahlia carrier has an FT4232H whose interface 3 is the Verdin console and interface 2 the MCU console, so
-
-```
-usbif 3
-usbif2 2
-port2 35933
-reboot
-```
-
-serves the first console on port 35932 and the second on 35933.
-The two channels are independent: each has its own USB interface, its own TCP port and its own busy state.
+The ports are independent: each has its own USB interface and its own busy state, and a client on one port does not block another.
 They share one USB device, one baud rate and one tailnet address.
+The USB interface is claimed only while a client is connected to its port.
+The ESP32-S3's host controller has eight pipes, one for control and two per open interface (three for CDC-ACM), so at most three ports of an FT4232H can be in use at the same time; a fourth connection is told `usb: cannot open the interface` and closed.
+`status` on the shell lists the interfaces with their ports and marks the open ones.
 
 ### Power and wiring
 

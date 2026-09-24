@@ -6,9 +6,11 @@
 //!
 //! One bridge serves one channel. A device with several serial interfaces (an
 //! FT4232H has four) has one bridge per interface, each on its own port, and
-//! "busy" is per bridge: a client on one port does not block the other.
+//! "busy" is per bridge: a client on one port does not block the other. The
+//! USB interface is claimed for the length of a session, so the host
+//! controller's pipes are shared by the ports that are in use.
 
-use crate::usb_host::UsbSerial;
+use crate::usb_host::{OpenError, UsbSerial};
 use anyhow::{anyhow, Result};
 use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +58,16 @@ pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
 fn serve(serial: &UsbSerial, conn: TcpStream, port: u16) -> Result<()> {
     let peer = conn.peer_addr();
     info!("bridge: client connected from {peer} on {port}");
+    match serial.open() {
+        Ok(()) => {}
+        Err(OpenError::NoDevice) => info!("bridge: {peer} on {port} waits for a device"),
+        Err(OpenError::Failed(e)) => {
+            warn!("bridge: rejecting {peer} on {port}: {e}");
+            let _ = conn.write_all(format!("usb: cannot open the interface: {e}\r\n").as_bytes());
+            conn.close();
+            return Ok(());
+        }
+    }
     let conn = Arc::new(conn);
     let serial2 = serial.clone();
     let c2 = conn.clone();
@@ -107,6 +119,7 @@ fn serve(serial: &UsbSerial, conn: TcpStream, port: u16) -> Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
     conn.close();
+    serial.close();
     info!("bridge: client {peer} on {port} disconnected");
     Ok(())
 }

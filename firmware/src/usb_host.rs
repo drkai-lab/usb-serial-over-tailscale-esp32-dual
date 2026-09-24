@@ -1,14 +1,31 @@
 //! USB Host with the CDC-ACM class driver: the target board's USB serial
-//! console. Handles attach/detach without restarting anything else.
+//! console(s). Handles attach/detach without restarting anything else.
+//!
+//! One [`UsbHost`] owns the host library and the CDC driver. When a device
+//! is attached, its configuration descriptor says which of its interfaces
+//! are serial ports (an FT4232H has four, a Raspberry Pi Debug Probe one on
+//! interface 1); each of those becomes a [`UsbSerial`] channel, created the
+//! first time it is seen and kept for the program's life, and the caller is
+//! told about it so it can start a bridge on the channel's port (the first
+//! port plus the interface number).
+//!
+//! A channel claims its USB interface only while a client is connected to
+//! its port ([`UsbSerial::open`] and [`UsbSerial::close`]). The ESP32-S3's
+//! host controller has eight channels ("pipes"): one for control transfers
+//! and two per open serial interface (three for CDC-ACM, which adds a
+//! notification pipe), so an FT4232H can have three of its four ports open
+//! at once but not all four. A channel outlives the device: a session waits
+//! while nothing is plugged in and carries on when the device comes back.
 
+use adapter_core::usbdesc::serial_interfaces;
 use adapter_core::usbserial::{ch34x_baud_registers, ftdi_baud_request, FtdiChip};
 use anyhow::{anyhow, Result};
 use esp_idf_svc::sys::{self, usb};
 use log::{debug, info, warn};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 const OUT_BUFFER: usize = 512;
@@ -126,32 +143,45 @@ const CH34X_LCR_8N1: u16 = 0x80 | 0x40 | 0x03;
 /// DTR and RTS asserted (the chip wants the complement on the wire).
 const CH34X_MCR_DTR_RTS: u16 = (1 << 6) | (1 << 5);
 
+/// How long an open waits for the device the descriptor callback just
+/// reported; it is already enumerated, so this only covers a race with
+/// an unplug.
+const OPEN_TIMEOUT_MS: u32 = 200;
+
 /// Raw CDC device handle; the driver is thread-safe for the calls we make.
 struct DevHandle(usb::cdc_acm_dev_hdl_t);
 unsafe impl Send for DevHandle {}
 
 /// The open device and who is using it. The disconnect callback must not
-/// close a handle another thread is transferring on, so a close requested
-/// while `in_use` is parked in `pending_close` for that thread to perform.
+/// close a handle another thread is sending on, so a close that arrives
+/// during a transfer is deferred to that thread.
 struct DevState {
     handle: Option<DevHandle>,
     in_use: bool,
     pending_close: Option<DevHandle>,
 }
 
+/// One serial channel: an interface of the attached device.
 struct Inner {
+    host: Weak<HostInner>,
     dev: Mutex<DevState>,
     rx: Mutex<VecDeque<u8>>,
     rx_cv: Condvar,
+    /// The interface is claimed and configured.
     attached: AtomicBool,
-    vid: AtomicU32,
-    pid: AtomicU32,
-    bcd_device: AtomicU32,
+    /// A client is on this channel's port, so the interface should be open;
+    /// the manager opens it when the device (re)appears.
+    wanted: AtomicBool,
+    /// The manager's last open failed; cleared when a device arrives or the
+    /// client leaves, so a failure is logged once rather than every second.
+    open_failed: AtomicBool,
     baud: u32,
     interface: u8,
+    /// The TCP port this channel is bridged on (first port + interface).
+    port: u16,
+    /// Driver of the device this channel was last opened on; `data_cb` uses
+    /// it to strip FTDI status bytes.
     driver: Mutex<Driver>,
-    /// Forced driver from the configuration; `None` means auto-detect.
-    forced: Option<Driver>,
 }
 
 #[derive(Clone)]
@@ -159,16 +189,74 @@ pub struct UsbSerial {
     inner: Arc<Inner>,
 }
 
-// Every channel that has been started. The per-device callbacks find their own
-// through the open call's user_arg; this list is for new_dev_cb, which the CDC
-// driver calls once per device rather than once per open.
-static INSTANCES: Mutex<Vec<Arc<Inner>>> = Mutex::new(Vec::new());
+/// Identity of the attached device, from its device descriptor.
+#[derive(Clone, Copy)]
+struct DeviceId {
+    vid: u16,
+    pid: u16,
+}
+
+/// Why a channel could not be opened for a client.
+#[derive(Debug)]
+pub enum OpenError {
+    /// Nothing is attached (or the device has no such interface); the
+    /// channel opens by itself once a device with the interface arrives.
+    NoDevice,
+    /// The interface is there but cannot be opened now, most often because
+    /// the host controller has no free pipe.
+    Failed(String),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::NoDevice => write!(f, "no device attached"),
+            OpenError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Called once per newly created channel with its interface, its port and
+/// the channel; the firmware starts a bridge on it.
+pub type ChannelHook = Box<dyn Fn(u8, u16, UsbSerial) + Send + Sync>;
+
+struct HostInner {
+    baud: u32,
+    /// Forced driver from the configuration; `None` means auto-detect.
+    forced: Option<Driver>,
+    /// Interface n is served on `base_port + n`.
+    base_port: u16,
+    /// The attached device and the driver picked for it; `None` while
+    /// nothing is attached.
+    device: Mutex<Option<DeviceId>>,
+    driver: Mutex<Driver>,
+    /// Serial interfaces of the attached device; emptied when it leaves and
+    /// filled by `new_dev_cb`.
+    present: Mutex<Vec<u8>>,
+    wake: Condvar,
+    /// Every channel ever created, by interface number. Channels are never
+    /// dropped: the CDC callbacks hold raw pointers into them.
+    channels: Mutex<BTreeMap<u8, UsbSerial>>,
+    /// Interfaces whose port would pass 65535, warned about once.
+    refused: Mutex<Vec<u8>>,
+    on_channel: ChannelHook,
+}
+
+/// The one USB host, for the callbacks the CDC driver calls without a
+/// user argument (`new_dev_cb`) and for the disconnect event, which ends
+/// the device for every channel.
+static HOST: Mutex<Option<Arc<HostInner>>> = Mutex::new(None);
+
+pub struct UsbHost {
+    inner: Arc<HostInner>,
+}
 
 /// The channel a callback belongs to, from the `user_arg` given at open time.
 ///
 /// # Safety
 /// `user` is the `Arc<Inner>` pointer passed to `cdc_acm_host_open_v2`, and the
-/// `Arc` it points into is kept alive in `INSTANCES` for the program's life.
+/// `Arc` it points into is kept alive in `HostInner::channels` for the
+/// program's life.
 unsafe fn inner_of<'a>(user: *mut c_void) -> Option<&'a Inner> {
     (!user.is_null()).then(|| &*(user as *const Inner))
 }
@@ -204,15 +292,12 @@ unsafe extern "C" fn data_cb(data: *const u8, len: usize, user: *mut c_void) -> 
     true
 }
 
-unsafe extern "C" fn event_cb(
-    event: *const usb::cdc_acm_host_dev_event_data_t,
-    user: *mut c_void,
-) {
+unsafe extern "C" fn event_cb(event: *const usb::cdc_acm_host_dev_event_data_t, user: *mut c_void) {
     let ev = &*event;
     match ev.type_ {
         usb::cdc_acm_host_dev_event_t_CDC_ACM_HOST_DEVICE_DISCONNECTED => {
-            info!("usb: device disconnected");
             if let Some(inner) = inner_of(user) {
+                info!("usb: interface {} disconnected", inner.interface);
                 let mut d = inner.dev.lock().unwrap();
                 inner.attached.store(false, Ordering::SeqCst);
                 if let Some(h) = d.handle.take() {
@@ -226,6 +311,11 @@ unsafe extern "C" fn event_cb(
                 }
                 inner.rx_cv.notify_all();
             }
+            // There is one device; when one channel loses it, all do.
+            if let Some(host) = HOST.lock().unwrap().as_ref() {
+                *host.device.lock().unwrap() = None;
+                host.present.lock().unwrap().clear();
+            }
         }
         usb::cdc_acm_host_dev_event_t_CDC_ACM_HOST_ERROR => {
             warn!("usb: cdc error {}", ev.data.error)
@@ -237,17 +327,69 @@ unsafe extern "C" fn event_cb(
     }
 }
 
+/// Runs on the CDC driver's task once per enumerated device: reads what the
+/// device is and which of its interfaces are serial ports, and hands the
+/// list to the manager thread, which does the opening (this callback must
+/// not block on the driver).
 unsafe extern "C" fn new_dev_cb(dev: usb::usb_device_handle_t) {
+    let Some(host) = HOST.lock().unwrap().clone() else {
+        return;
+    };
     let mut desc: *const usb::usb_device_desc_t = core::ptr::null();
-    if usb::usb_host_get_device_descriptor(dev, &mut desc) == sys::ESP_OK && !desc.is_null() {
-        let d = &(*desc).__bindgen_anon_1;
-        let (vid, pid, bcd, class) = (d.idVendor, d.idProduct, d.bcdDevice, d.bDeviceClass);
-        info!("usb: new device VID {vid:04x} PID {pid:04x} rev {bcd:04x} class {class:02x}");
-        for inner in INSTANCES.lock().unwrap().iter() {
-            inner.vid.store(vid as u32, Ordering::Relaxed);
-            inner.pid.store(pid as u32, Ordering::Relaxed);
-            inner.bcd_device.store(bcd as u32, Ordering::Relaxed);
-        }
+    if usb::usb_host_get_device_descriptor(dev, &mut desc) != sys::ESP_OK || desc.is_null() {
+        warn!("usb: new device without a readable device descriptor");
+        return;
+    }
+    let d = &(*desc).__bindgen_anon_1;
+    let (vid, pid, bcd, class) = (d.idVendor, d.idProduct, d.bcdDevice, d.bDeviceClass);
+    let mut cfg: *const usb::usb_config_desc_t = core::ptr::null();
+    if usb::usb_host_get_active_config_descriptor(dev, &mut cfg) != sys::ESP_OK || cfg.is_null() {
+        warn!("usb: device {vid:04x}:{pid:04x} has no readable configuration descriptor");
+        return;
+    }
+    let total = (*cfg).__bindgen_anon_1.wTotalLength as usize;
+    let bytes = std::slice::from_raw_parts(cfg as *const u8, total);
+    let driver = match host.forced {
+        Some(f) => f.refine(bcd),
+        None => Driver::detect(vid, pid, bcd),
+    };
+    // Vendor-class interfaces are ports only on a known serial chip, or
+    // when the user said what the device is.
+    let vendor_serial = host.forced.is_some() || driver != Driver::Cdc;
+    let interfaces = serial_interfaces(bytes, vendor_serial);
+    info!(
+        "usb: new device VID {vid:04x} PID {pid:04x} rev {bcd:04x} class {class:02x}: {}, serial interfaces {interfaces:?}",
+        driver.name()
+    );
+    if interfaces.is_empty() {
+        warn!("usb: no serial interface found; usbdrv <cdc|ftdi|cp210x|ch34x> forces one");
+    }
+    *host.driver.lock().unwrap() = driver;
+    *host.device.lock().unwrap() = Some(DeviceId { vid, pid });
+    for channel in host.channels.lock().unwrap().values() {
+        channel.inner.open_failed.store(false, Ordering::Relaxed);
+    }
+    *host.present.lock().unwrap() = interfaces;
+    host.wake.notify_all();
+}
+
+/// How many devices the host library currently has enumerated. A device
+/// that leaves while no interface of it is open sends no event to us, so
+/// the manager polls this to notice.
+fn devices_on_bus() -> usize {
+    let mut addresses = [0u8; 8];
+    let mut count: core::ffi::c_int = 0;
+    let rc = unsafe {
+        usb::usb_host_device_addr_list_fill(
+            addresses.len() as core::ffi::c_int,
+            addresses.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    if rc == sys::ESP_OK {
+        count.max(0) as usize
+    } else {
+        0
     }
 }
 
@@ -259,107 +401,263 @@ fn esp_check(rc: sys::esp_err_t, what: &str) -> Result<()> {
     }
 }
 
-impl UsbSerial {
-    /// Start one channel: an interface of the attached device, bridged on its
-    /// own TCP port. The USB host library and the CDC driver are installed by
-    /// the first call and shared by the rest.
-    pub fn start(baud: u32, interface: u8, forced: Option<Driver>) -> Result<Self> {
-        let inner = Arc::new(Inner {
-            dev: Mutex::new(DevState {
-                handle: None,
-                in_use: false,
-                pending_close: None,
-            }),
-            rx: Mutex::new(VecDeque::new()),
-            rx_cv: Condvar::new(),
-            attached: AtomicBool::new(false),
-            vid: AtomicU32::new(0),
-            pid: AtomicU32::new(0),
-            bcd_device: AtomicU32::new(0),
+impl UsbHost {
+    /// Installs the USB host library and the CDC driver and starts the
+    /// manager thread. `on_channel` is called for every serial interface
+    /// the first time a device shows it, with the port `base_port +
+    /// interface`.
+    pub fn start(
+        baud: u32,
+        forced: Option<Driver>,
+        base_port: u16,
+        on_channel: ChannelHook,
+    ) -> Result<Self> {
+        let inner = Arc::new(HostInner {
             baud,
-            interface,
-            driver: Mutex::new(Driver::Cdc),
             forced,
+            base_port,
+            device: Mutex::new(None),
+            driver: Mutex::new(forced.unwrap_or(Driver::Cdc)),
+            present: Mutex::new(Vec::new()),
+            wake: Condvar::new(),
+            channels: Mutex::new(BTreeMap::new()),
+            refused: Mutex::new(Vec::new()),
+            on_channel,
         });
-        let first = {
-            let mut list = INSTANCES.lock().unwrap();
-            list.push(inner.clone());
-            list.len() == 1
-        };
-
-        if first {
-            unsafe {
-                let mut host_cfg: usb::usb_host_config_t = core::mem::zeroed();
-                host_cfg.intr_flags = sys::ESP_INTR_FLAG_LEVEL1 as i32;
-                esp_check(usb::usb_host_install(&host_cfg), "usb_host_install")?;
+        {
+            let mut slot = HOST.lock().unwrap();
+            if slot.is_some() {
+                return Err(anyhow!("usb host already started"));
             }
-            // USB host library event pump.
-            std::thread::Builder::new()
-                .name("usb-events".into())
-                .stack_size(4 * 1024)
-                .spawn(|| unsafe {
-                    loop {
-                        let mut flags: u32 = 0;
-                        usb::usb_host_lib_handle_events(u32::MAX, &mut flags);
-                        if flags & usb::USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS != 0 {
-                            usb::usb_host_device_free_all();
-                        }
-                    }
-                })?;
-            unsafe {
-                let mut drv: usb::cdc_acm_host_driver_config_t = core::mem::zeroed();
-                // The data callback runs on this task (FTDI status stripping,
-                // queue locking, logging), so give it room.
-                drv.driver_task_stack_size = 8192;
-                drv.driver_task_priority = 10;
-                drv.xCoreID = 0;
-                drv.new_dev_cb = Some(new_dev_cb);
-                esp_check(usb::cdc_acm_host_install(&drv), "cdc_acm_host_install")?;
-            }
-            info!("usb: host installed, waiting for a CDC-ACM device");
+            *slot = Some(inner.clone());
         }
-        info!("usb: channel on interface {interface} at {baud} baud");
-        let serial = UsbSerial { inner };
-        let s = serial.clone();
+
+        unsafe {
+            let mut host_cfg: usb::usb_host_config_t = core::mem::zeroed();
+            host_cfg.intr_flags = sys::ESP_INTR_FLAG_LEVEL1 as i32;
+            esp_check(usb::usb_host_install(&host_cfg), "usb_host_install")?;
+        }
+        // USB host library event pump.
         std::thread::Builder::new()
-            .name(format!("usb-open{interface}"))
-            .stack_size(6 * 1024)
-            .spawn(move || s.open_loop())?;
-        Ok(serial)
+            .name("usb-events".into())
+            .stack_size(4 * 1024)
+            .spawn(|| unsafe {
+                loop {
+                    let mut flags: u32 = 0;
+                    usb::usb_host_lib_handle_events(u32::MAX, &mut flags);
+                    if flags & usb::USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS != 0 {
+                        usb::usb_host_device_free_all();
+                    }
+                }
+            })?;
+        unsafe {
+            let mut drv: usb::cdc_acm_host_driver_config_t = core::mem::zeroed();
+            // The data callback runs on this task (FTDI status stripping,
+            // queue locking, logging), so give it room.
+            drv.driver_task_stack_size = 8192;
+            drv.driver_task_priority = 10;
+            drv.xCoreID = 0;
+            drv.new_dev_cb = Some(new_dev_cb);
+            esp_check(usb::cdc_acm_host_install(&drv), "cdc_acm_host_install")?;
+        }
+        info!(
+            "usb: host installed at {baud} baud, interface n on port {base_port}+n; waiting for a device"
+        );
+        let host = inner.clone();
+        std::thread::Builder::new()
+            .name("usb-manager".into())
+            .stack_size(8 * 1024)
+            .spawn(move || manage(&host))?;
+        Ok(UsbHost { inner })
     }
 
-    fn open_loop(&self) {
-        loop {
-            if self.inner.attached.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-            match self.try_open() {
-                Ok(()) => {
-                    info!(
-                        "usb: console attached ({}) at {} baud",
-                        self.describe(),
-                        self.inner.baud
-                    );
-                }
-                Err(e) => {
-                    if !e.to_string().starts_with("no device") {
-                        warn!("usb: open failed: {e}");
+    /// One line for `status`: the device and its channels with their ports.
+    pub fn describe(&self) -> String {
+        let Some(dev) = *self.inner.device.lock().unwrap() else {
+            return "detached".into();
+        };
+        let driver = *self.inner.driver.lock().unwrap();
+        let channels: Vec<String> = self
+            .inner
+            .channels
+            .lock()
+            .unwrap()
+            .values()
+            .map(|c| {
+                format!(
+                    "if{}:{}{}",
+                    c.inner.interface,
+                    c.inner.port,
+                    if c.inner.attached.load(Ordering::Relaxed) {
+                        " (open)"
+                    } else {
+                        ""
                     }
-                    std::thread::sleep(Duration::from_millis(1000));
+                )
+            })
+            .collect();
+        format!(
+            "{} {:04x}:{:04x} {}",
+            driver.name(),
+            dev.vid,
+            dev.pid,
+            if channels.is_empty() {
+                "no serial interface".to_string()
+            } else {
+                channels.join(" ")
+            }
+        )
+    }
+}
+
+impl HostInner {
+    /// The channel for an interface, created (and announced through
+    /// `on_channel`) the first time. `None` when its port would not fit.
+    fn channel(&self, self_weak: &Weak<HostInner>, interface: u8) -> Option<UsbSerial> {
+        let mut channels = self.channels.lock().unwrap();
+        if let Some(c) = channels.get(&interface) {
+            return Some(c.clone());
+        }
+        let Some(port) = self.base_port.checked_add(interface as u16) else {
+            let mut refused = self.refused.lock().unwrap();
+            if !refused.contains(&interface) {
+                refused.push(interface);
+                warn!(
+                    "usb: interface {interface} not bridged: port {} + {interface} is past 65535",
+                    self.base_port
+                );
+            }
+            return None;
+        };
+        let channel = UsbSerial {
+            inner: Arc::new(Inner {
+                host: self_weak.clone(),
+                dev: Mutex::new(DevState {
+                    handle: None,
+                    in_use: false,
+                    pending_close: None,
+                }),
+                rx: Mutex::new(VecDeque::new()),
+                rx_cv: Condvar::new(),
+                attached: AtomicBool::new(false),
+                wanted: AtomicBool::new(false),
+                open_failed: AtomicBool::new(false),
+                baud: self.baud,
+                interface,
+                port,
+                driver: Mutex::new(Driver::Cdc),
+            }),
+        };
+        channels.insert(interface, channel.clone());
+        drop(channels);
+        info!("usb: interface {interface} is served on port {port}");
+        (self.on_channel)(interface, port, channel.clone());
+        Some(channel)
+    }
+}
+
+/// Keeps the channels in step with the bus: creates a channel (and its
+/// bridge) for every serial interface a device shows, opens the channels
+/// whose port has a client once the device is there, and notices a device
+/// leaving while no interface of it was open (the driver reports that only
+/// to open interfaces). Runs on `new_dev_cb`'s wake and once a second.
+fn manage(host: &Arc<HostInner>) {
+    let weak = Arc::downgrade(host);
+    let mut present = host.present.lock().unwrap();
+    loop {
+        let interfaces = present.clone();
+        drop(present);
+        if !interfaces.is_empty() && devices_on_bus() == 0 {
+            info!("usb: device gone");
+            *host.device.lock().unwrap() = None;
+            host.present.lock().unwrap().clear();
+        } else {
+            let driver = *host.driver.lock().unwrap();
+            for interface in interfaces {
+                let Some(channel) = host.channel(&weak, interface) else {
+                    continue;
+                };
+                let inner = &channel.inner;
+                if !inner.wanted.load(Ordering::SeqCst)
+                    || inner.attached.load(Ordering::SeqCst)
+                    || inner.open_failed.load(Ordering::Relaxed)
+                {
+                    continue;
+                }
+                match channel.try_open(driver) {
+                    Ok(()) => info!(
+                        "usb: interface {interface} open on port {} for the waiting client",
+                        inner.port
+                    ),
+                    Err(e) => {
+                        warn!("usb: interface {interface}: {e}; the client on port {} waits for the next device", inner.port);
+                        inner.open_failed.store(true, Ordering::Relaxed);
+                    }
                 }
             }
         }
+        present = host.present.lock().unwrap();
+        present = host
+            .wake
+            .wait_timeout(present, Duration::from_secs(1))
+            .unwrap()
+            .0;
+    }
+}
+
+impl UsbSerial {
+    /// Claims and configures the interface for a client that just connected
+    /// to this channel's port. With nothing attached the call returns
+    /// [`OpenError::NoDevice`] and the manager opens the interface when a
+    /// device arrives; the caller keeps the session either way. Any other
+    /// error is for the caller to report and end the session with.
+    pub fn open(&self) -> std::result::Result<(), OpenError> {
+        self.inner.wanted.store(true, Ordering::SeqCst);
+        self.inner.open_failed.store(false, Ordering::Relaxed);
+        if self.inner.attached.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(host) = self.inner.host.upgrade() else {
+            return Err(OpenError::Failed("usb host gone".into()));
+        };
+        if host.device.lock().unwrap().is_none()
+            || !host.present.lock().unwrap().contains(&self.inner.interface)
+        {
+            return Err(OpenError::NoDevice);
+        }
+        let driver = *host.driver.lock().unwrap();
+        self.try_open(driver)
+            .map_err(|e| OpenError::Failed(e.to_string()))
     }
 
-    fn try_open(&self) -> Result<()> {
+    /// Releases the interface when the client leaves, so its pipes are
+    /// free for another channel.
+    pub fn close(&self) {
+        self.inner.wanted.store(false, Ordering::SeqCst);
+        self.inner.open_failed.store(false, Ordering::Relaxed);
+        self.inner.attached.store(false, Ordering::SeqCst);
+        let mut d = self.inner.dev.lock().unwrap();
+        if let Some(h) = d.handle.take() {
+            if d.in_use {
+                // A transfer is in flight: its thread closes the handle.
+                d.pending_close = Some(h);
+            } else {
+                drop(d);
+                unsafe { usb::cdc_acm_host_close(h.0) };
+            }
+        }
+        self.inner.rx.lock().unwrap().clear();
+        debug!("usb: interface {} closed", self.inner.interface);
+    }
+
+    fn try_open(&self, driver: Driver) -> Result<()> {
         unsafe {
             let mut cfg: usb::cdc_acm_host_open_config_t = core::mem::zeroed();
             cfg.vid = usb::CDC_HOST_ANY_VID as u16;
             cfg.pid = usb::CDC_HOST_ANY_PID as u16;
             cfg.interface_idx = self.inner.interface;
             cfg.dev_addr = usb::CDC_HOST_ANY_DEV_ADDR as u8;
-            cfg.connection_timeout_ms = 1000;
+            cfg.connection_timeout_ms = OPEN_TIMEOUT_MS;
             cfg.out_buffer_size = OUT_BUFFER;
             cfg.in_buffer_size = IN_BUFFER;
             cfg.event_cb = Some(event_cb);
@@ -368,8 +666,13 @@ impl UsbSerial {
             cfg.user_arg = Arc::as_ptr(&self.inner) as *mut c_void;
             let mut hdl: usb::cdc_acm_dev_hdl_t = core::ptr::null_mut();
             let rc = usb::cdc_acm_host_open_v2(&cfg, &mut hdl);
+            if rc == sys::ESP_ERR_NOT_SUPPORTED {
+                return Err(anyhow!(
+                    "no free USB host pipe (the ESP32-S3 has 8: one for control and two per open interface)"
+                ));
+            }
             if rc != sys::ESP_OK {
-                return Err(anyhow!("no device ({rc})"));
+                return Err(anyhow!("open failed (esp_err {rc})"));
             }
             // Publish the handle before configuring, marked in use: a
             // disconnect during setup then defers the close to us instead
@@ -382,13 +685,6 @@ impl UsbSerial {
                 d.handle = Some(DevHandle(hdl));
                 d.in_use = true;
             }
-            let vid = self.inner.vid.load(Ordering::Relaxed) as u16;
-            let pid = self.inner.pid.load(Ordering::Relaxed) as u16;
-            let bcd = self.inner.bcd_device.load(Ordering::Relaxed) as u16;
-            let driver = match self.inner.forced {
-                Some(d) => d.refine(bcd),
-                None => Driver::detect(vid, pid, bcd),
-            };
             *self.inner.driver.lock().unwrap() = driver;
             let configured = self.configure(hdl, driver);
             let mut d = self.inner.dev.lock().unwrap();
@@ -557,30 +853,16 @@ impl UsbSerial {
         }
         debug!(
             "usb: FTDI port {port} ({}) configured for {} baud (wValue {:#06x} wIndex {:#06x})",
-            if chip.fast_clock { "12 MHz clock" } else { "3 MHz clock" },
+            if chip.fast_clock {
+                "12 MHz clock"
+            } else {
+                "3 MHz clock"
+            },
             self.inner.baud,
             baud.value,
             baud.index
         );
         Ok(())
-    }
-
-    pub fn is_attached(&self) -> bool {
-        self.inner.attached.load(Ordering::Relaxed)
-    }
-
-    pub fn describe(&self) -> String {
-        if self.is_attached() {
-            format!(
-                "{} {:04x}:{:04x} if{}",
-                self.inner.driver.lock().unwrap().name(),
-                self.inner.vid.load(Ordering::Relaxed),
-                self.inner.pid.load(Ordering::Relaxed),
-                self.inner.interface
-            )
-        } else {
-            "detached".into()
-        }
     }
 
     /// Reads bytes received from the target; `Ok(0)` on timeout.

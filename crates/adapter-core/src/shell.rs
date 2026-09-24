@@ -30,16 +30,11 @@ pub struct SavedConfig {
     pub networks: Vec<WifiNetwork>,
     pub hostname: String,
     pub auth_key: Option<String>,
+    /// The first TCP port. Every serial interface of the target is bridged
+    /// on its own port, this one plus the interface number; `None` means
+    /// [`DEFAULT_TCP_PORT`].
     pub tcp_port: Option<u16>,
     pub baud_rate: Option<u32>,
-    /// USB interface index of the target's console (devices such as the
-    /// Raspberry Pi Debug Probe expose the UART on interface 1).
-    pub usb_interface: Option<u8>,
-    /// A second channel, for a device with more than one serial interface (an
-    /// FT4232H has four). `None` in either field leaves it off; the two ports
-    /// must differ.
-    pub usb_interface2: Option<u8>,
-    pub tcp_port2: Option<u16>,
     /// Forced USB serial driver name (`cdc`, `ftdi`, `cp210x`, `ch34x`);
     /// `None` auto-detects from the device's vendor and product ID.
     pub usb_driver: Option<String>,
@@ -92,6 +87,12 @@ pub trait Platform {
     fn factory_reset(&self) -> Result<(), String>;
     fn reboot(&self) -> !;
 }
+
+/// The first TCP port when none is configured: interface n of the target is
+/// served on 35930 + n, so a plain CDC console is on 35930, the UART of a
+/// Raspberry Pi Debug Probe on 35931 and the Verdin console of a Toradex
+/// Dahlia on 35933.
+pub const DEFAULT_TCP_PORT: u16 = 35930;
 
 const PROMPT: &str = "> ";
 const LOGIN_WAIT: Duration = Duration::from_secs(600);
@@ -299,7 +300,9 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
             },
             "port" => match args.first().and_then(|p| p.parse::<u16>().ok()) {
                 Some(p) if p != 0 => self.set_field(|c| c.tcp_port = Some(p)),
-                _ => self.line("usage: port <1-65535>"),
+                _ => self.line(&format!(
+                    "usage: port <1-65535>  (first port, default {DEFAULT_TCP_PORT}; USB interface n is served on port+n)"
+                )),
             },
             "usbdrv" => match args.first().copied() {
                 Some("auto") => self.set_field(|c| c.usb_driver = None),
@@ -308,25 +311,6 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
                     self.set_field(|c| c.usb_driver = Some(d))
                 }
                 _ => self.line("usage: usbdrv <auto|cdc|ftdi|cp210x|ch34x>"),
-            },
-            "usbif" => match args.first().and_then(|i| i.parse::<u8>().ok()) {
-                Some(i) => self.set_field(|c| c.usb_interface = Some(i)),
-                _ => self.line("usage: usbif <interface index> (0 is the first CDC interface; the Raspberry Pi Debug Probe's UART is 1)"),
-            },
-            "usbif2" => match args.first().copied() {
-                Some("off") => self.set_field(|c| {
-                    c.usb_interface2 = None;
-                    c.tcp_port2 = None;
-                }),
-                Some(i) => match i.parse::<u8>() {
-                    Ok(i) => self.set_field(|c| c.usb_interface2 = Some(i)),
-                    Err(_) => self.line("usage: usbif2 <interface index|off>"),
-                },
-                None => self.line("usage: usbif2 <interface index|off>  (second channel; set port2 as well)"),
-            },
-            "port2" => match args.first().and_then(|p| p.parse::<u16>().ok()) {
-                Some(p) if p != 0 => self.set_field(|c| c.tcp_port2 = Some(p)),
-                _ => self.line("usage: port2 <1-65535>  (second channel; set usbif2 as well)"),
             },
             "baud" => match args.first().and_then(|b| b.parse::<u32>().ok()) {
                 Some(b) if b != 0 => self.set_field(|c| c.baud_rate = Some(b)),
@@ -367,11 +351,8 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
             "hostname <name>    set the tailnet hostname",
             "authkey <key>      optional auth key for headless login",
             "login              register with Tailscale (prints approval URL)",
-            "port <n>           TCP port of the serial bridge (default 35932)",
+            "port <n>           first TCP port (default 35930); USB interface n is served on port+n",
             "baud <rate>        USB serial baud rate (default 115200)",
-            "usbif <n>          USB interface of the target console (default 0; Debug Probe UART is 1)",
-            "usbif2 <n|off>     second channel's USB interface (a multi-port FTDI has one per UART)",
-            "port2 <n>          second channel's TCP port (needs usbif2; must differ from port)",
             "usbdrv <name>      force the USB serial driver (auto/cdc/ftdi/cp210x/ch34x)",
             "reset              erase configuration and identity",
             "reboot             restart",
@@ -409,22 +390,18 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
         self.line(&format!("Memory:    {}", st.heap));
         if let Some(c) = self.platform.config() {
             self.line(&format!(
-                "Config:    networks={} hostname={} port={} baud={} usbif={} usbdrv={} authkey={}",
+                "Config:    networks={} hostname={} port={} baud={} usbdrv={} authkey={}",
                 c.networks
                     .iter()
                     .map(|n| n.ssid.as_str())
                     .collect::<Vec<_>>()
                     .join(","),
                 c.hostname,
-                c.tcp_port.unwrap_or(35932),
+                c.tcp_port.unwrap_or(DEFAULT_TCP_PORT),
                 c.baud_rate.unwrap_or(115200),
-                c.usb_interface.unwrap_or(0),
                 c.usb_driver.as_deref().unwrap_or("auto"),
                 if c.auth_key.is_some() { "set" } else { "none" }
             ));
-            if let (Some(i), Some(p)) = (c.usb_interface2, c.tcp_port2) {
-                self.line(&format!("Channel 2: port={p} usbif={i}"));
-            }
         } else {
             self.line("Config:    none");
         }
@@ -819,9 +796,9 @@ mod tests {
         assert_eq!(cfg.tcp_port, Some(2301));
         assert_eq!(cfg.baud_rate, Some(9600));
         assert!(con.output.contains("usage: authkey"));
-        assert!(con
-            .output
-            .contains("Config:    networks= hostname=my-host port=2301 baud=9600 usbif=0 usbdrv=auto authkey=none"));
+        assert!(con.output.contains(
+            "Config:    networks= hostname=my-host port=2301 baud=9600 usbdrv=auto authkey=none"
+        ));
 
         let mut con = FakeConsole {
             input: b"abd\x7fc\r".to_vec().into(),
@@ -847,55 +824,5 @@ mod tests {
             read_line(&mut con, true, Some(Duration::from_millis(1)), &mut false),
             None
         );
-    }
-
-    #[test]
-    fn second_channel_is_configured_as_a_pair() {
-        let plat = FakePlatform::default();
-        let mut con = FakeConsole {
-            input: b"usbif 3
-usbif2 2
-port2 35933
-status
-"
-            .to_vec()
-            .into(),
-            output: String::new(),
-            strict: true,
-        };
-        {
-            let mut sh = Shell::new(&mut con, &plat);
-            for _ in 0..4 {
-                let cmd = read_line(sh.console, true, None, &mut sh.swallow_lf).unwrap();
-                sh.dispatch(&cmd);
-            }
-        }
-        let cfg = plat.config().unwrap();
-        assert_eq!(cfg.usb_interface, Some(3));
-        assert_eq!(cfg.usb_interface2, Some(2));
-        assert_eq!(cfg.tcp_port2, Some(35933));
-        assert!(con.output.contains("Channel 2: port=35933 usbif=2"));
-
-        // "off" takes the whole channel away, port included.
-        let mut con = FakeConsole {
-            input: b"usbif2 off
-status
-"
-            .to_vec()
-            .into(),
-            output: String::new(),
-            strict: true,
-        };
-        {
-            let mut sh = Shell::new(&mut con, &plat);
-            for _ in 0..2 {
-                let cmd = read_line(sh.console, true, None, &mut sh.swallow_lf).unwrap();
-                sh.dispatch(&cmd);
-            }
-        }
-        let cfg = plat.config().unwrap();
-        assert_eq!(cfg.usb_interface2, None);
-        assert_eq!(cfg.tcp_port2, None);
-        assert!(!con.output.contains("Channel 2:"));
     }
 }

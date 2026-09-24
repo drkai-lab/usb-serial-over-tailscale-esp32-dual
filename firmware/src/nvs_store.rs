@@ -56,10 +56,10 @@ const K_AUTH: &str = "auth_key";
 const K_HOST: &str = "hostname";
 const K_PORT: &str = "tcp_port";
 const K_BAUD: &str = "baud_rate";
-const K_USBIF: &str = "usb_if";
-const K_USBIF2: &str = "usb_if2";
-const K_PORT2: &str = "tcp_port2";
 const K_USBDRV: &str = "usb_drv";
+/// Written by firmware before every interface got its own port; removed on
+/// save and on reset so nothing stale is left behind.
+const LEGACY_KEYS: &[&str] = &["usb_if", "usb_if2", "tcp_port2"];
 
 const ALL_KEYS: &[&str] = &[
     K_SSID,
@@ -69,9 +69,6 @@ const ALL_KEYS: &[&str] = &[
     K_HOST,
     K_PORT,
     K_BAUD,
-    K_USBIF,
-    K_USBIF2,
-    K_PORT2,
     K_USBDRV,
     tsnode::node::KEY_MACHINE,
     tsnode::node::KEY_NODE,
@@ -126,9 +123,6 @@ pub fn load_config(store: &dyn Store) -> Option<SavedConfig> {
         auth_key: store.get(K_AUTH).filter(|k| !k.is_empty()),
         tcp_port: store.get(K_PORT).and_then(|p| p.parse().ok()),
         baud_rate: store.get(K_BAUD).and_then(|b| b.parse().ok()),
-        usb_interface: store.get(K_USBIF).and_then(|i| i.parse().ok()),
-        usb_interface2: store.get(K_USBIF2).and_then(|i| i.parse().ok()),
-        tcp_port2: store.get(K_PORT2).and_then(|p| p.parse().ok()),
         usb_driver: store.get(K_USBDRV).filter(|d| !d.is_empty()),
     })
 }
@@ -157,22 +151,10 @@ pub fn save_config(store: &dyn Store, cfg: &SavedConfig) -> std::io::Result<()> 
         K_BAUD,
         cfg.baud_rate.map(|b| b.to_string()).as_deref(),
     )?;
-    set_or_remove(
-        store,
-        K_USBIF,
-        cfg.usb_interface.map(|i| i.to_string()).as_deref(),
-    )?;
-    set_or_remove(
-        store,
-        K_USBIF2,
-        cfg.usb_interface2.map(|i| i.to_string()).as_deref(),
-    )?;
-    set_or_remove(
-        store,
-        K_PORT2,
-        cfg.tcp_port2.map(|p| p.to_string()).as_deref(),
-    )?;
     set_or_remove(store, K_USBDRV, cfg.usb_driver.as_deref())?;
+    for k in LEGACY_KEYS {
+        let _ = store.remove(k);
+    }
     if identity_changed {
         let _ = store.remove(tsnode::node::KEY_REGISTERED);
         let _ = store.remove(tsnode::node::KEY_HOME_DERP);
@@ -201,7 +183,7 @@ pub fn forget_auth_key(store: &dyn Store) -> std::io::Result<()> {
 /// removed key survives in older pages; the whole partition is erased
 /// (Wi-Fi calibration data included) and the caller must reboot.
 pub fn factory_reset(store: &dyn Store) -> std::io::Result<()> {
-    for k in ALL_KEYS {
+    for k in ALL_KEYS.iter().chain(LEGACY_KEYS) {
         let _ = store.remove(k);
     }
     let rc = unsafe { esp_idf_svc::sys::nvs_flash_erase() };

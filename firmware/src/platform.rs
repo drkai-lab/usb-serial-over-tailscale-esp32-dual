@@ -3,11 +3,11 @@
 
 use crate::nvs_store::{self, NvsStore};
 use crate::tls::EspDialer;
-use crate::usb_host::UsbSerial;
+use crate::usb_host::UsbHost;
 use crate::wifi::WifiManager;
 use adapter_core::shell::{ApInfo, NodeState, Platform, SavedConfig, StatusSnapshot};
 use esp_idf_svc::sys;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tsnode::net::Spawner;
 use tsnode::node::{Node, NodeConfig, NodeState as TsState};
@@ -16,7 +16,8 @@ pub struct EspPlatform {
     pub store: Arc<NvsStore>,
     pub wifi: Arc<WifiManager>,
     pub node: Mutex<Option<Node>>,
-    pub serial: Option<UsbSerial>,
+    /// The USB host, set once it is started (normal mode only).
+    pub usb: OnceLock<UsbHost>,
     pub setup_mode: bool,
 }
 
@@ -107,9 +108,10 @@ impl Platform for EspPlatform {
             node: Some(self.node_state()),
             derp,
             peers,
-            usb: match &self.serial {
-                Some(s) => format!("{} ({})", s.describe(), crate::usb_host::root_port_state()),
-                None => "device mode (setup console)".into(),
+            usb: match self.usb.get() {
+                Some(h) => format!("{} ({})", h.describe(), crate::usb_host::root_port_state()),
+                None if self.setup_mode => "device mode (setup console)".into(),
+                None => "starting".into(),
             },
             heap,
         }

@@ -7,7 +7,7 @@ PSRAM 付きの ESP32-S3 単体で Tailnet に参加し、対象 SBC の USB シ
 ![ノート PC から Tailscale 経由で対象ボードのシリアルコンソールに届く。ESP32-S3 は USB 充電器から給電し、対象の USB ポートに挿す](web/overview.webp)
 
 ```text
-Remote PC ──Tailscale / TCP:35932──▶ ESP32-S3 ──USB host──▶ 対象 SBC のシリアルコンソール
+Remote PC ──Tailscale / TCP:35930+n──▶ ESP32-S3 ──USB host──▶ 対象 SBC のシリアルインターフェース n
 ```
 
 Tailscale のノードとして必要な機能（制御プロトコル、WireGuard、DERP、NAT 越え）は Rust で独自に実装している。
@@ -39,7 +39,8 @@ PSRAM は必須である。ネットワーク系スレッドのスタックと T
 | N16R8 | 16 MB | 8 MB Octal | `partitions.csv`（アプリ 6 MB） | 実機確認済み |
 | N8R8 | 8 MB | 8 MB Octal | `partitions.csv` | ビルドのみ、未確認 |
 | N4R8 | 4 MB | 8 MB Octal | `partitions-4m.csv`（アプリ 3 MB） | ビルドのみ、未確認 |
-| N16R2、N8R2、N4R2 | 16、8、4 MB | 2 MB Quad | 上と同じ | ビルドのみ、未確認 |
+| N8R2 | 8 MB | 2 MB Quad | `partitions.csv` | 実機確認済み |
+| N16R2、N4R2 | 16、4 MB | 2 MB Quad | 上と同じ | ビルドのみ、未確認 |
 | WROOM-2 N16R8V、N32R8V | 16、32 MB Octal | 8 MB Octal | `partitions.csv` | ビルドのみ、未確認 |
 | N4、N8、N16（PSRAM なし） | | なし | | 非対応 |
 
@@ -142,10 +143,8 @@ auth key を使う場合は `authkey tskey-auth-...` を打ってから `login` 
 | --- | --- |
 | `wifi <ssid> <pw>` | Wi-Fi を追加して接続する。複数登録でき、起動時と再接続時に一番強い既知の AP を選ぶ。 |
 | `wifi list`、`wifi forget <ssid>` | 登録済み Wi-Fi の一覧と削除。 |
-| `usbif <n>` | 対象の USB インターフェース番号。Raspberry Pi Debug Probe の UART は 1、Toradex Dahlia の Verdin コンソールは 3。 |
 | `usbdrv <auto\|cdc\|ftdi\|cp210x\|ch34x>` | USB シリアル変換チップの指定。既定は VID と PID による自動判別。 |
-| `port <n>`、`baud <rate>` | ブリッジの TCP ポート（既定 35932。E=3、S=5、P=9 で「ESP32」）と対象のボーレート（既定 115200）。 |
-| `usbif2 <n\|off>`、`port2 <n>` | 同じ機器の別インターフェースを、別の TCP ポートでもう 1 本ブリッジする。両方の設定が必要で、`usbif2 off` で 2 本目をやめる。 |
+| `port <n>`、`baud <rate>` | 先頭の TCP ポート（既定 35930。対象の USB インターフェース n は port+n に出る）と対象のボーレート（既定 115200）。 |
 | `status`、`reset`、`reboot` | 状態表示、設定と鍵の消去、再起動。 |
 
 同じシェルは UART ポート（115200 bps、ログと共用）でも常時使える。
@@ -154,32 +153,34 @@ BOOT を押しながら起動すると、再びセットアップモードにな
 
 ### 接続
 
-Tailnet 上の任意の端末から、hostname か Tailnet アドレスの 35932 番に生の TCP でつなぐ。
+対象のシリアルインターフェースは 1 本ずつ別の TCP ポートに出る。ポート番号は先頭のポート（`port` で変えなければ 35930）に USB インターフェース番号を足したものである。
+どのインターフェースがシリアルかは機器を挿したときに記述子から読むので、設定は要らない。
+
+| 対象 | インターフェース | ポート |
+| --- | --- | --- |
+| 普通の CDC-ACM コンソール（1 機能） | 0 | 35930 |
+| Raspberry Pi Debug Probe（0 は CMSIS-DAP） | 1 | 35931 |
+| Toradex Dahlia の MCU コンソール（FT4232H ポート C） | 2 | 35932 |
+| Toradex Dahlia の Verdin コンソール（FT4232H ポート D） | 3 | 35933 |
+
+Tailnet 上の任意の端末から、hostname か Tailnet アドレスのそのポートに生の TCP でつなぐ。
 
 ```bash
-socat -,rawer,escape=0x1d TCP:target-console:35932   # Ctrl-] で抜ける
-nc target-console 35932
+socat -,rawer,escape=0x1d TCP:target-console:35933   # Ctrl-] で抜ける
+nc target-console 35933
 ```
 
-1 本のチャネルで同時に使えるのは 1 接続である。
+1 つのポートで同時に使えるのは 1 接続である。
 使用中に届いた 2 本目の接続には `busy` と応答して切断する。
 応答のない相手は 120 秒で切り、次の接続を受け付ける。
 バイト列はそのまま双方向に流れ、プロトコルの付加はない。
 ボーレートはアダプタ側の設定で決まり、クライアントからは変えられない。
 
-シリアルインターフェースを複数持つ機器なら、2 本まとめてブリッジできる。
-Toradex Dahlia キャリアの FT4232H は、インターフェース 3 が Verdin のコンソール、2 が MCU のコンソールなので、
-
-```
-usbif 3
-usbif2 2
-port2 35933
-reboot
-```
-
-とすると、1 本目が 35932 番、2 本目が 35933 番に出る。
-2 本のチャネルは独立していて、USB インターフェースも TCP ポートも busy 判定も別々である。
+ポートどうしは独立していて、USB インターフェースも busy 判定も別々で、あるポートの接続が別のポートを妨げることはない。
 共通なのは USB 機器とボーレートと Tailnet アドレスである。
+USB インターフェースは、そのポートにクライアントがつないでいる間だけ確保する。
+ESP32-S3 のホストコントローラのパイプは 8 本で、制御に 1 本、開いているインターフェース 1 つにつき 2 本（CDC-ACM は 3 本）使うので、FT4232H で同時に使えるのは 3 ポートまでである。4 本目の接続には `usb: cannot open the interface` と返して切る。
+シェルの `status` はインターフェースとポートの一覧を出し、開いているものに印を付ける。
 
 ### 給電と配線
 

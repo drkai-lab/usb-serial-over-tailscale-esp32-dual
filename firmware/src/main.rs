@@ -4,9 +4,10 @@
 //! - Setup Mode (BOOT button held, or Wi-Fi/Tailscale not yet set up): the
 //!   native USB port is a CDC-ACM serial device running an interactive setup
 //!   shell; the same shell is available on UART0.
-//! - Normal Mode: native USB port is a USB host for the target's CDC-ACM
-//!   console; Wi-Fi + Tailscale node + TCP serial bridge. The shell stays
-//!   available on UART0 (`status`, `setup`, ...).
+//! - Normal Mode: native USB port is a USB host for the target's serial
+//!   console(s); Wi-Fi + Tailscale node + one TCP bridge per serial interface
+//!   of the target, on the first port plus the interface number. The shell
+//!   stays available on UART0 (`status`, `setup`, ...).
 #![allow(unexpected_cfgs)]
 
 mod bridge;
@@ -18,7 +19,7 @@ mod tls;
 mod usb_host;
 mod wifi;
 
-use adapter_core::shell::{Platform, Shell};
+use adapter_core::shell::{Platform, Shell, DEFAULT_TCP_PORT};
 use anyhow::{Context, Result};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::AnyIOPin;
@@ -27,12 +28,10 @@ use esp_idf_svc::hal::uart::UartDriver;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::{info, warn};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// "ESP32" with E=3, S=5, P=9; unassigned in the IANA registry.
-pub const DEFAULT_TCP_PORT: u16 = 35932;
 pub const DEFAULT_BAUD: u32 = 115_200;
 
 fn main() -> Result<()> {
@@ -79,66 +78,29 @@ fn main() -> Result<()> {
     let _sntp = esp_idf_svc::sntp::EspSntp::new_default().ok();
 
     // Native USB port: host (normal) or CDC device (setup); never both.
-    let (serial, cdc) = if setup_mode {
+    // The host is started below, after the node, so a target present at
+    // boot finds a node to be bridged on.
+    let cdc = if setup_mode {
         match console::UsbSerialConsole::install(
             peripherals.usb_serial,
             peripherals.pins.gpio19,
             peripherals.pins.gpio20,
         ) {
-            Ok(c) => (None, Some(c)),
+            Ok(c) => Some(c),
             Err(e) => {
                 warn!("setup: USB serial console unavailable: {e:#}; use UART0");
-                (None, None)
+                None
             }
         }
     } else {
-        let baud = config
-            .as_ref()
-            .and_then(|c| c.baud_rate)
-            .unwrap_or(DEFAULT_BAUD);
-        let iface = config.as_ref().and_then(|c| c.usb_interface).unwrap_or(0);
-        let forced = config
-            .as_ref()
-            .and_then(|c| c.usb_driver.as_deref())
-            .and_then(usb_host::Driver::parse)
-            .flatten();
-        // The second channel, if the configuration has both halves of it and
-        // its port and interface differ from the first.
-        let second = match (
-            config.as_ref().and_then(|c| c.usb_interface2),
-            config.as_ref().and_then(|c| c.tcp_port2),
-        ) {
-            (Some(i2), Some(p2)) if i2 != iface => Some((i2, p2)),
-            (Some(i2), Some(_)) => {
-                warn!("usb: ignoring channel 2, interface {i2} is the first one");
-                None
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                warn!("usb: channel 2 needs both usbif2 and port2");
-                None
-            }
-            (None, None) => None,
-        };
-        let first_serial = usb_host::UsbSerial::start(baud, iface, forced).context("usb host")?;
-        let second_serial = match second {
-            Some((i2, p2)) => Some((
-                usb_host::UsbSerial::start(baud, i2, forced).context("usb host (channel 2)")?,
-                p2,
-            )),
-            None => None,
-        };
-        (Some((first_serial, second_serial)), None)
-    };
-    let (serial, serial2) = match serial {
-        Some((s, s2)) => (Some(s), s2),
-        None => (None, None),
+        None
     };
 
     let platform = Arc::new(platform::EspPlatform {
         store: store.clone(),
         wifi: wifi.clone(),
         node: std::sync::Mutex::new(None),
-        serial: serial.clone(),
+        usb: OnceLock::new(),
         setup_mode,
     });
 
@@ -159,6 +121,45 @@ fn main() -> Result<()> {
                 .start_node()
                 .map_err(|e| anyhow::anyhow!(e))
                 .context("node")?;
+        }
+    }
+
+    // USB host: every serial interface of the target gets a bridge on
+    // `port + interface` the first time the device shows it.
+    if !setup_mode {
+        let cfg = config.as_ref().expect("normal mode has a configuration");
+        let baud = cfg.baud_rate.unwrap_or(DEFAULT_BAUD);
+        let base_port = cfg.tcp_port.unwrap_or(DEFAULT_TCP_PORT);
+        let forced = cfg
+            .usb_driver
+            .as_deref()
+            .and_then(usb_host::Driver::parse)
+            .flatten();
+        let node = platform.node().expect("node started in normal mode");
+        let host = usb_host::UsbHost::start(
+            baud,
+            forced,
+            base_port,
+            Box::new(move |interface, port, serial| {
+                let node = node.clone();
+                let spawned = platform::spawn_thread(
+                    &format!("bridge{port}"),
+                    8 * 1024,
+                    true,
+                    Box::new(move || {
+                        if let Err(e) = bridge::run(node, serial, port) {
+                            warn!("bridge: interface {interface} on port {port} stopped: {e:#}");
+                        }
+                    }),
+                );
+                if let Err(e) = spawned {
+                    warn!("bridge: interface {interface} on port {port} not started: {e}");
+                }
+            }),
+        )
+        .context("usb host")?;
+        if platform.usb.set(host).is_err() {
+            warn!("usb: host started twice");
         }
     }
 
@@ -193,35 +194,11 @@ fn main() -> Result<()> {
 
     spawn_supervisor(platform.clone());
 
-    if let Some(serial) = serial {
-        let node = platform.node().expect("node started in normal mode");
-        let port = config
-            .as_ref()
-            .and_then(|c| c.tcp_port)
-            .unwrap_or(DEFAULT_TCP_PORT);
-        if let Some((serial2, port2)) = serial2 {
-            if port2 == port {
-                warn!("bridge: channel 2 wants port {port2}, which channel 1 has; not started");
-            } else {
-                let node2 = node.clone();
-                platform::spawn_thread(
-                    "bridge2",
-                    8 * 1024,
-                    true,
-                    Box::new(move || {
-                        if let Err(e) = bridge::run(node2, serial2, port2) {
-                            warn!("bridge: channel 2 stopped: {e:#}");
-                        }
-                    }),
-                )?;
-            }
-        }
-        bridge::run(node, serial, port)
-    } else {
+    if setup_mode {
         info!("setup: open the USB serial port (or press Enter on UART0) to configure");
-        loop {
-            std::thread::sleep(Duration::from_secs(60));
-        }
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
     }
 }
 
