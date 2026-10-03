@@ -63,6 +63,9 @@ pub struct StatusSnapshot {
     pub peers: String,
     pub usb: String,
     pub heap: String,
+    /// Why the chip last reset, as the platform reports it ("power-on",
+    /// "brownout", ...). Empty when the platform cannot tell.
+    pub last_reset: String,
 }
 
 /// Device actions the shell can perform. Methods take `&self`; implementors
@@ -388,6 +391,9 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
         self.line(&format!("Peers:     {}", st.peers));
         self.line(&format!("USB:       {}", st.usb));
         self.line(&format!("Memory:    {}", st.heap));
+        if !st.last_reset.is_empty() {
+            self.line(&format!("Reset:     {}", st.last_reset));
+        }
         if let Some(c) = self.platform.config() {
             self.line(&format!(
                 "Config:    networks={} hostname={} port={} baud={} usbdrv={} authkey={}",
@@ -441,8 +447,16 @@ impl<'a, C: Console, P: Platform> Shell<'a, C, P> {
         if c.networks.is_empty() {
             self.line("no known networks");
         }
+        // Whether a password is stored is shown, never the password: an
+        // entry saved without one is tried as an open network and can never
+        // join a WPA network, and the SSID alone does not show that.
         for n in &c.networks {
-            self.line(&format!("  {}", n.ssid));
+            let kind = if n.password.is_empty() {
+                "no password (open network)"
+            } else {
+                "password set"
+            };
+            self.line(&format!("  {}  [{kind}]", n.ssid));
         }
     }
 
@@ -672,6 +686,7 @@ mod tests {
             StatusSnapshot {
                 firmware: "t".into(),
                 setup_mode: true,
+                last_reset: "brownout".into(),
                 ..Default::default()
             }
         }
@@ -799,6 +814,7 @@ mod tests {
         assert!(con.output.contains(
             "Config:    networks= hostname=my-host port=2301 baud=9600 usbdrv=auto authkey=none"
         ));
+        assert!(con.output.contains("Reset:     brownout"), "{}", con.output);
 
         let mut con = FakeConsole {
             input: b"abd\x7fc\r".to_vec().into(),
@@ -824,5 +840,41 @@ mod tests {
             read_line(&mut con, true, Some(Duration::from_millis(1)), &mut false),
             None
         );
+    }
+
+    #[test]
+    fn wifi_list_tells_whether_a_password_is_stored() {
+        let plat = FakePlatform::default();
+        plat.save_config(&SavedConfig {
+            networks: vec![
+                WifiNetwork {
+                    ssid: "home".into(),
+                    password: "secret123".into(),
+                },
+                WifiNetwork {
+                    ssid: "cafe".into(),
+                    password: String::new(),
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut con = FakeConsole {
+            input: VecDeque::new(),
+            output: String::new(),
+            strict: true,
+        };
+        Shell::new(&mut con, &plat).dispatch("wifi list");
+        assert!(
+            con.output.contains("home  [password set]"),
+            "{}",
+            con.output
+        );
+        assert!(
+            con.output.contains("cafe  [no password (open network)]"),
+            "{}",
+            con.output
+        );
+        assert!(!con.output.contains("secret123"), "{}", con.output);
     }
 }

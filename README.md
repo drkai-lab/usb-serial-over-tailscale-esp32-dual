@@ -192,6 +192,15 @@ This ties the VBUS of the two USB-C connectors together, so after bridging it **
 For setup, connect only the native port to the PC; in normal operation, connect the COM port to power and the native port to the target.
 If the target is a CDC-ACM or FTDI-style bridge chip, that chip is usually bus-powered and needs this 5 V.
 
+### A board that resets every few seconds
+
+If the COM port log shows a new `ESP-ROM` banner every 1 to 4 seconds with `rst:0x3 (RTC_SW_SYS_RST)`, read the line `last reset:` near the top of the next boot (or `Reset:` in `status`).
+`brownout` means the supply voltage dropped while Wi-Fi was transmitting or the target's bridge chip was starting.
+The fix is the power: a port or charger that can supply the board and the target's bridge chip together, with a short cable.
+The IDF's own "Brownout detector was triggered" line can be missing from the log, and the ROM banner looks the same as after `reboot`.
+The `Password length is zero` warning in older firmware came from a placeholder configuration on every boot and did not mean the stored password was empty; `wifi list` shows whether each network has one.
+`RECOVERY.md` has the procedure as it was done for one board.
+
 ## Building and flashing
 
 Prerequisites are the `esp` toolchain installed with `espup`, `ldproxy` and `espflash`.

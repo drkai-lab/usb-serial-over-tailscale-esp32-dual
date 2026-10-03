@@ -38,6 +38,12 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
     info!("usb-serial-over-tailscale firmware {FIRMWARE_VERSION} starting");
+    let reset = platform::last_reset();
+    if reset.is_fault() {
+        warn!("last reset: {}", reset.describe());
+    } else {
+        info!("last reset: {}", reset.describe());
+    }
 
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;

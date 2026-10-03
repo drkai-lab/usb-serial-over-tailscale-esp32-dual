@@ -29,7 +29,15 @@ impl WifiManager {
         nvs: EspDefaultNvsPartition,
     ) -> Result<Arc<Self>> {
         let mut wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs))?;
-        wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
+        // A placeholder until `connect` sets real credentials. The default
+        // client configuration pairs an empty password with a WPA2 threshold,
+        // which makes the IDF warn "Password length is zero, but authmode
+        // threshold is 3" on every boot whatever networks are stored; an open
+        // placeholder states what it is.
+        wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+            auth_method: AuthMethod::None,
+            ..Default::default()
+        }))?;
         wifi.start()?;
         // Power save adds tens of milliseconds of latency to every packet;
         // an interactive console is better off without it.

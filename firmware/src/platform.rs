@@ -114,6 +114,7 @@ impl Platform for EspPlatform {
                 None => "starting".into(),
             },
             heap,
+            last_reset: last_reset().describe(),
         }
     }
 
@@ -214,6 +215,64 @@ impl Platform for EspPlatform {
         std::thread::sleep(Duration::from_millis(300));
         unsafe { sys::esp_restart() }
     }
+}
+
+/// Why the chip last reset, from `esp_reset_reason()`.
+///
+/// The IDF's brownout handler ends in a software system reset, so the ROM
+/// banner says `rst:0x3 (RTC_SW_SYS_RST)`, the same as after `reboot`, and
+/// its "Brownout detector was triggered" line can be missing from the log
+/// (it was, on every one of the 39 brownouts of usb-serial-1 on 2026-10-03).
+/// The reason the IDF keeps in RTC memory across the reset is the record
+/// that survives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetReason {
+    PowerOn,
+    Software,
+    Panic,
+    Watchdog,
+    Brownout,
+    Other(sys::esp_reset_reason_t),
+}
+
+impl ResetReason {
+    pub fn from_raw(r: sys::esp_reset_reason_t) -> Self {
+        match r {
+            sys::esp_reset_reason_t_ESP_RST_POWERON => ResetReason::PowerOn,
+            sys::esp_reset_reason_t_ESP_RST_SW => ResetReason::Software,
+            sys::esp_reset_reason_t_ESP_RST_PANIC => ResetReason::Panic,
+            sys::esp_reset_reason_t_ESP_RST_INT_WDT
+            | sys::esp_reset_reason_t_ESP_RST_TASK_WDT
+            | sys::esp_reset_reason_t_ESP_RST_WDT => ResetReason::Watchdog,
+            sys::esp_reset_reason_t_ESP_RST_BROWNOUT => ResetReason::Brownout,
+            other => ResetReason::Other(other),
+        }
+    }
+
+    /// True for a reset nobody asked for.
+    pub fn is_fault(self) -> bool {
+        matches!(
+            self,
+            ResetReason::Panic | ResetReason::Watchdog | ResetReason::Brownout
+        )
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            ResetReason::PowerOn => "power-on".into(),
+            ResetReason::Software => "software (reboot command or esp_restart)".into(),
+            ResetReason::Panic => "panic".into(),
+            ResetReason::Watchdog => "watchdog".into(),
+            ResetReason::Brownout => {
+                "brownout: the chip supply dropped below the detector threshold".into()
+            }
+            ResetReason::Other(n) => format!("esp_reset_reason {n}"),
+        }
+    }
+}
+
+pub fn last_reset() -> ResetReason {
+    ResetReason::from_raw(unsafe { sys::esp_reset_reason() })
 }
 
 /// Thread spawner that puts the stacks of network worker threads in PSRAM.
