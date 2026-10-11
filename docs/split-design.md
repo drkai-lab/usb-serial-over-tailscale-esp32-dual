@@ -1,4 +1,6 @@
-# Two-chip split: control chip (B) + data chip (A), 2x ESP32-WROOM-32
+# Split design notes: control chip (B) + data chip (A)
+
+Design notes behind the [README](../README.md). The wiring diagram is [wiring.png](wiring.png).
 
 Status: **phase 1** (software). Builds for `xtensa-esp32-espidf` (no PSRAM)
 and is tested on the host; **not yet run on hardware**.
@@ -23,17 +25,17 @@ its public half. The machine key stays on B.
 
 ```
 cd firmware
-cargo build --release --features role-control   # chip B
-cargo build --release --features role-data      # chip A
-cargo build --release                           # single-chip node (unchanged)
+CARGO_TARGET_DIR=target-control cargo build --release --features role-control   # chip B
+CARGO_TARGET_DIR=target-data    cargo build --release --features role-data      # chip A
 ```
 
 Both roles use `variants/wroom32-nopsram.defaults`. Flash with the 4 MB
 partition table (`partitions.csv` has a 6 MB app slot for the S3 boards):
 
 ```
-espflash flash --flash-size 4mb --partition-table partitions-wroom32.csv \
-  target/xtensa-esp32-espidf/release/usb-serial-over-tailscale-firmware
+espflash flash --chip esp32 --port /dev/ttyUSB0 --flash-size 4mb \
+  --partition-table partitions-wroom32.csv \
+  target-control/xtensa-esp32-espidf/release/usb-serial-over-tailscale-firmware
 ```
 
 ## Pin map (ESP32-WROOM-32 / DevKitC)

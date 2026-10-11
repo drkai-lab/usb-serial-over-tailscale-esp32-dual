@@ -1,256 +1,191 @@
-# usb-serial-over-tailscale
+# usb-serial-over-tailscale for two ESP32-WROOM-32 boards
 
-[日本語](README-ja.md)
+[日本語](README.ja.md)
 
-An ESP32-S3 board with PSRAM that joins a tailnet on its own and bridges the USB serial console of a target SBC to a TCP port on the tailnet.
+This is a fork of [signal-slot/usb-serial-over-tailscale](https://github.com/signal-slot/usb-serial-over-tailscale) by Tasuku Suzuki.
+The original turns one ESP32-S3 with PSRAM into a Tailscale node that bridges a target board's serial console to a TCP port on your tailnet.
+The background is in his article: [ESP32-S3 単体を Tailscale ノードにして、SBC のシリアルコンソールをどこからでも開く](https://zenn.dev/tasuku/articles/0caef1a822c4e6) (Zenn, Japanese).
 
-![A laptop reaches the target board's serial console through Tailscale; the ESP32-S3 is powered from a USB charger and plugged into the target's USB port](web/overview.webp)
-
-```text
-Remote PC ──Tailscale / TCP:35930+n──▶ ESP32-S3 ──USB host──▶ serial interface n of the target SBC
-```
-
-Everything a Tailscale node needs (control protocol, WireGuard, DERP, NAT traversal) is implemented in Rust in this repository.
-Initial setup is an interactive shell over USB serial; flashing and setup are done from a browser, with nothing to install.
+I had two old ESP32-WROOM-32 DevKitC boards lying around and wanted to use them for the same job.
+They have no PSRAM, and a full Tailscale node (control client, WireGuard, DERP, TCP stack) does not fit in one of them with room to spare.
+So this fork splits the node across the two chips: one talks to the control server, the other carries the packets and the serial console.
+They talk to each other over a UART link.
 
 ## Status
 
-Verified on hardware:
+Read this first.
 
-- Wi-Fi setup through the wizard and joining a tailnet with the approval URL.
-- `tailscale ping` from another node, both via DERP and over a direct path.
-- Console access to a Raspberry Pi Debug Probe (CDC-ACM) and a Toradex Dahlia (FT4232H).
-- Recovery after adapter reboot, Wi-Fi reconnection and USB replug.
+- Both firmware roles build for `xtensa-esp32-espidf` (ESP-IDF v5.3.3, no PSRAM, 4 MB flash).
+- The host-side tests pass, including an integration test that runs both roles in one process over a lossy socket pair.
+- **It has not been run on real hardware yet.** The UART link at 2 Mbit/s, Wi-Fi on both chips and the memory headroom are all untested.
+- The heap and stack numbers below are estimates from the build output and the disassembly, not measurements.
 
-Not verified:
+If you want something that works today, use the upstream ESP32-S3 version.
 
-- Headless registration with an auth key.
-- CP210x, CH340/CH341, and non-H-series FTDI chips such as the FT232R.
-- Recovery after a reboot of the target SBC, an internet outage, or an unreachable control server.
-- Long-running operation, behaviour after node key expiry (180 days by default), and reboots triggered by the task watchdog.
+## How it is split
 
-### Module variants
-
-Flash size and PSRAM mode are build-time settings, so CI builds one image per ESP32-S3 module variant (`firmware/variants/`).
-PSRAM is required: network thread stacks and TLS buffers live there.
-
-| Variant | Flash | PSRAM | Partition table | Status |
-| --- | --- | --- | --- | --- |
-| N16R8 | 16 MB | 8 MB octal | `partitions.csv` (6 MB app) | tested |
-| N8R8 | 8 MB | 8 MB octal | `partitions.csv` | built, untested |
-| N4R8 | 4 MB | 8 MB octal | `partitions-4m.csv` (3 MB app) | built, untested |
-| N8R2 | 8 MB | 2 MB quad | `partitions.csv` | tested |
-| N16R2, N4R2 | 16, 4 MB | 2 MB quad | as above | built, untested |
-| WROOM-2 N16R8V, N32R8V | 16, 32 MB octal | 8 MB octal | `partitions.csv` | built, untested |
-| N4, N8, N16 (no PSRAM) | | none | | not supported |
-
-The WROOM-1U (external antenna) uses the same variants as the WROOM-1. The MINI-1 N4R2 matches `n4r2`.
-
-To build a variant locally, point esp-idf-sys at its defaults file and pass the variant to the image script:
-
-```bash
-cd firmware
-ESP_IDF_SDKCONFIG_DEFAULTS="sdkconfig.defaults;variants/n8r2.defaults" cargo build --release
-tools/mkimage.sh n8r2 release
-```
-
-## Layout
-
-| Path | Role |
-| --- | --- |
-| `crates/tsnode` | Tailscale node: control plane (ts2021 Noise and a minimal HTTP/2), WireGuard, DERP, disco, STUN, TCP termination with smoltcp. Runs on a host and on ESP-IDF. |
-| `crates/adapter-core` | Interactive setup shell. I/O and device operations are traits, so the wizard is unit-tested on the host. |
-| `tools/hostnode` | Runs tsnode on Linux for verification: joins a real tailnet and serves an echo server. |
-| `firmware` | ESP32-S3 firmware (esp-idf-svc): setup console, USB host (CDC-ACM, FTDI, CP210x, CH34x), Wi-Fi, Tailscale node, TCP bridge. |
-
-tsnode is split into these modules.
-
-| Module | Contents |
-| --- | --- |
-| `controlbase`, `h2`, `control` | `/key` fetch, Noise IK handshake over `POST /ts2021`, `/machine/register` and `/machine/map` over HTTP/2. `/key` is always TLS; the Noise transport tries plain :80 first and falls back to TLS. |
-| `wireguard` | Noise IKpsk2 handshake (initiator and responder), transport, replay window, rekey and keepalive timers. |
-| `derp` | DERP relay client (TLS, fast-start, ping/pong, NotePreferred). |
-| `disco`, `stun` | ping, pong and call-me-maybe for direct paths; public endpoint discovery with STUN. |
-| `magicsock` | Path selection between UDP and DERP, handshake handling, peer table. |
-| `netstack` | TCP termination on the tailnet addresses with smoltcp. |
-| `node` | Ties the above together in threads. Keys persist in NVS or a file. |
-
-## Usage
-
-### Prepare the board (soldering required)
-
-Use an ESP32-S3 board with PSRAM and two USB-C ports (COM and native USB).
-Short the `USB-OTG` solder pad on the back of the board (shown below before bridging).
-
-<img src="web/usb-otg-pad.webp" alt="USB-OTG solder pad on the back of the board, still open" width="360">
-This is required: it feeds 5 V from the board to the target's USB port, and without it the target chip never powers up and is never detected.
-The two ports have fixed roles: **`COM` = 5 V power in** (a charger or a PC), **`USB` = the SBC** (the target's debug USB port). Only for flashing and setup does `USB` go to the PC instead.
-See "Power and wiring" below for the safety rule that follows from it.
-
-### Flash from a browser
-
-Open [signal-slot.github.io/usb-serial-over-tailscale](https://signal-slot.github.io/usb-serial-over-tailscale/) in Chrome or Edge to flash and configure the board without installing anything.
-The page opens the board's USB Serial/JTAG port with WebSerial and writes the CI-built binaries with ESP Web Tools (esptool-js).
-A terminal on the same page runs the setup wizard.
-It works on Windows 10 and later, macOS, Linux and ChromeOS; it does not work in Firefox, Safari or on phones.
-Connect the native USB port. The COM port (CH343) needs a driver on Windows and is not used.
-
-Pick the module variant on the page from the marking on the module's metal can (for example `ESP32-S3-WROOM-1-N16R8`).
-CI (GitHub Actions) builds every variant on each push. Tags matching `v*` also attach `usb-serial-over-tailscale-<variant>.bin` (bootloader, partition table and app merged into one file) to a release.
-The merged file can be written with `esptool write_flash 0x0`, but it also overwrites the NVS area with 0xFF, which erases the configuration and registration.
-Updates from the page write only the three regions and keep the configuration.
-
-### Initial setup
-
-An unconfigured board plugged into a PC through the native USB port shows up as a USB serial port (Espressif USB JTAG/serial, 303a:1001).
-Open it in a terminal and press Enter to start the wizard.
-
-```bash
-screen /dev/ttyACM0 115200
-```
-
-Leave DTR and RTS as a terminal leaves them, both asserted.
-On this port they are wired to the chip's reset and boot pins, so a tool that
-drives them apart resets the board into the ROM download mode, where it goes
-quiet and answers nothing. `espflash monitor --port /dev/ttyACM0` is the safe
-way to watch the port from a script.
-
-```text
-usb-serial-over-tailscale 0.1.0 - setup mode
-Press Enter to start setup, or type a command:
-=== Setup ===
-Scanning Wi-Fi...
-   1) home-wifi        (-48 dBm)
-Select network number, or type an SSID (Enter to rescan, q to quit): 1
-Password for home-wifi: ********
-Connected (192.168.1.42)
-Hostname on the tailnet [target-console]:
-Registering with Tailscale... (press q to stop waiting)
-Open this URL in a browser to approve the device:
-  https://login.tailscale.com/a/xxxxxxxx
-Waiting for approval...
-Tailscale is up: target-console.example.ts.net 100.x.y.z
-Setup complete. Reboot into normal mode now? [Y/n]
-```
-
-`setup` only adds a Wi-Fi network when the hostname and the Tailscale registration are already done.
-`setup all` starts over.
-To use an auth key, run `authkey tskey-auth-...` and then `login`.
-
-The main commands are listed below; `help` prints the full list.
-
-| Command | Description |
-| --- | --- |
-| `wifi <ssid> <pw>` | Add a Wi-Fi network and connect. Several can be stored; the strongest known AP is chosen at boot and on reconnect. |
-| `wifi list`, `wifi forget <ssid>` | List and remove stored networks. |
-| `usbdrv <auto\|cdc\|ftdi\|cp210x\|ch34x>` | USB-serial bridge chip. The default detects it from VID and PID. |
-| `port <n>`, `baud <rate>` | First TCP port (default 35930; USB interface n of the target is served on port+n) and baud rate of the target (default 115200). |
-| `status`, `reset`, `reboot` | Show status, erase configuration and keys, reboot. |
-
-The same shell is always available on the UART port (115200 bps, shared with the log).
-Press Enter to get a prompt.
-Holding BOOT while powering on enters setup mode again.
-
-### Connecting
-
-Every serial interface of the target is served on its own TCP port: the first port (35930 unless `port` changed it) plus the USB interface number.
-Which interfaces those are is read from the device when it is plugged in, so nothing has to be configured.
-
-| Target | Interface | Port |
+| | Chip B (control, `role-control`) | Chip A (data, `role-data`) |
 | --- | --- | --- |
-| A plain CDC-ACM console (one function) | 0 | 35930 |
-| Raspberry Pi Debug Probe (interface 0 is CMSIS-DAP) | 1 | 35931 |
-| Toradex Dahlia, MCU console (FT4232H port C) | 2 | 35932 |
-| Toradex Dahlia, Verdin console (FT4232H port D) | 3 | 35933 |
+| Network | Wi-Fi, talks only to the control server | Wi-Fi, carries all tailnet traffic |
+| Tailscale | ts2021 control client (Noise, HTTP/2), map stream, registration | WireGuard, disco/STUN, DERP, packet filter (ACL), smoltcp TCP stack |
+| Keys | machine key | node key (the private half never leaves A) |
+| Serial | setup shell and logs on UART0 (USB) | target console on UART2, logs on UART0 |
 
-From any machine on the tailnet, open a raw TCP connection to that port of the hostname or tailnet address.
+B receives the network map from the control server and turns it into a compact configuration for A: addresses, DERP map, peers and packet filter.
+A applies it and reports back its public keys, endpoints, home DERP region and peer status.
+When B is down, A keeps running on the last configuration it applied, so existing connections stay up.
+
+The link between the chips (`crates/splitlink`):
+
+- UART1 at 2 Mbit/s with RTS/CTS hardware flow control.
+- Frames are COBS-encoded with a CRC-32. Every message is acknowledged and retransmitted if the ACK does not come back.
+- Each side picks a random epoch at boot, so a reboot of either chip is noticed right away.
+- Configuration is versioned. B sends a full snapshot when bulk state changes or when A reports a different version, and small deltas (peer added, removed or patched) otherwise.
+
+More detail is in [docs/split-design.md](docs/split-design.md).
+
+## Parts
+
+- 2 x ESP32-WROOM-32 DevKitC (or a compatible board with a USB-UART chip). 4 MB flash, no PSRAM needed.
+- 7 jumper wires for the link and ground, under 20 cm.
+- 3 jumper wires to the target (TX, RX, GND).
+- 2 USB cables and a USB power source for each board.
+- The target must have a 3.3 V UART. For 5 V or RS-232 levels you need a level shifter.
+
+## Wiring
+
+![Wiring diagram for two ESP32-WROOM-32 boards and a target](docs/wiring.png)
+
+Both boards use the same pin numbers. The link wires cross over.
+
+| From | To | Signal |
+| --- | --- | --- |
+| B GPIO25 (TX) | A GPIO26 (RX) | link data B to A |
+| A GPIO25 (TX) | B GPIO26 (RX) | link data A to B |
+| B GPIO33 (RTS) | A GPIO32 (CTS) | flow control |
+| A GPIO33 (RTS) | B GPIO32 (CTS) | flow control |
+| B GND | A GND | common ground (required) |
+| A GPIO17 (TX) | target RX | target console |
+| A GPIO16 (RX) | target TX | target console |
+| A GND | target GND | common ground (required) |
+
+- Power each board from its own USB port. Do not connect 3V3 or 5V between the boards.
+- B's USB port goes to your PC for the setup shell. The BOOT button (GPIO0) on B, held at power-on, enters setup mode.
+- Pins I stayed away from: GPIO6 to 11 (connected to flash) and the strapping pins 2, 5, 12 and 15. GPIO32 and 33 are free on the DevKitC because it has no 32 kHz crystal.
+- Keep the link wires short. If you need longer wires, lower `LINK_BAUD` in `firmware/src/link_uart.rs` on both boards.
+
+The source is [docs/wiring.svg](docs/wiring.svg).
+
+## Building
+
+You need the `esp` Rust toolchain from `espup`, plus `ldproxy` and `espflash`.
+ESP-IDF itself is downloaded into `firmware/.embuild/` on the first build. That takes a while and a few GB of disk.
 
 ```bash
-socat -,rawer,escape=0x1d TCP:target-console:35933   # Ctrl-] to exit
-nc target-console 35933
+cargo install espup ldproxy espflash
+espup install
 ```
 
-One connection at a time is served per port.
-A second connection while one is active receives `busy` and is closed.
-A peer that stops responding is dropped after 120 seconds and the next connection is accepted.
-Bytes flow unchanged in both directions; there is no protocol on top.
-The baud rate is set on the adapter and cannot be changed by the client.
+Do not source `~/export-esp.sh`. The build uses the gcc that esp-idf-sys installs into `.embuild/`, and having espup's Xtensa gcc first on `PATH` breaks the link.
 
-The ports are independent: each has its own USB interface and its own busy state, and a client on one port does not block another.
-They share one USB device, one baud rate and one tailnet address.
-The USB interface is claimed only while a client is connected to its port.
-The ESP32-S3's host controller has eight pipes, one for control and two per open interface (three for CDC-ACM), so at most three ports of an FT4232H can be in use at the same time; a fourth connection is told `usb: cannot open the interface` and closed.
-`status` on the shell lists the interfaces with their ports and marks the open ones.
-
-### Power and wiring
-
-Power the board through the COM-side USB port, from a PC or a USB charger.
-The native port is the USB host port for the target; the target's debug port is not expected to supply power.
-
-To supply 5 V from the native port, bridge the `USB-OTG` solder pad on the back of the board (present on many DevKitC-1-compatible boards with two USB-C ports; boards without it need their own way of feeding VBUS to the native port).
-This ties the VBUS of the two USB-C connectors together, so after bridging it **never plug both ports into PCs at the same time**.
-For setup, connect only the native port to the PC; in normal operation, connect the COM port to power and the native port to the target.
-If the target is a CDC-ACM or FTDI-style bridge chip, that chip is usually bus-powered and needs this 5 V.
-
-### A board that resets every few seconds
-
-If the COM port log shows a new `ESP-ROM` banner every 1 to 4 seconds with `rst:0x3 (RTC_SW_SYS_RST)`, read the line `last reset:` near the top of the next boot (or `Reset:` in `status`).
-`brownout` means the supply voltage dropped while Wi-Fi was transmitting or the target's bridge chip was starting.
-The fix is the power: a port or charger that can supply the board and the target's bridge chip together, with a short cable.
-The IDF's own "Brownout detector was triggered" line can be missing from the log, and the ROM banner looks the same as after `reboot`.
-The `Password length is zero` warning in older firmware came from a placeholder configuration on every boot and did not mean the stored password was empty; `wifi list` shows whether each network has one.
-`RECOVERY.md` has the procedure as it was done for one board.
-
-## Building and flashing
-
-Prerequisites are the `esp` toolchain installed with `espup`, `ldproxy` and `espflash`.
-ESP-IDF v5.3.3 and the `espressif/usb_host_cdc_acm` component are fetched into `firmware/.embuild/` on the first build (several GB, several minutes).
+Build each role into its own target directory so one does not overwrite the other:
 
 ```bash
-# host-side unit tests and verification tool
-cargo test
-cargo run -p hostnode -- probe-control                      # control-plane check (an AuthURL from a keyless registration is enough)
-cargo run -p hostnode -- run --hostname tsnode-test        # join a real tailnet and serve an echo server (prints the approval URL)
-
-# firmware
 cd firmware
-cargo build --release
-cargo run --release      # espflash flash --monitor --flash-size 16mb --partition-table partitions.csv
+CARGO_TARGET_DIR=target-control cargo build --release --features role-control
+CARGO_TARGET_DIR=target-data    cargo build --release --features role-data
 ```
 
-Do not source `~/export-esp.sh`.
-gcc and clang come from what esp-idf-sys installs into `.embuild/`; with espup's Xtensa gcc first on PATH the link fails.
+Image sizes from my build: about 1.44 MB for B and 1.33 MB for A.
 
-The partition tables are `firmware/partitions.csv` (6 MB factory app, for 8 and 16 MB flash) and `firmware/partitions-4m.csv` (3 MB, for 4 MB flash).
-To flash with esptool, build the binaries into `dist/<variant>/` with `tools/mkimage.sh <variant> release`.
+Host tests, from the repository root:
 
 ```bash
-cd firmware && tools/mkimage.sh n16r8 release
-PY=$(ls -d .embuild/espressif/python_env/*/bin/python | head -1)
-$PY -m esptool --chip esp32s3 --port /dev/ttyACM0 --baud 921600 write_flash \
-  0x0 dist/n16r8/bootloader.bin 0x8000 dist/n16r8/partition-table.bin 0x10000 dist/n16r8/app.bin
+cargo test --workspace
+cargo test -p tsnode --features split          # both roles over a lossy socket pair
+cargo test -p tsnode --features lowmem,split
 ```
 
-The cargo runner pins the board's UART port to `/dev/ttyACM0`; adjust `.cargo/config.toml` for your machine.
-`hostnode run` stores its keys in plain text in `hostnode-state.json`.
+## Flashing
 
-## Design decisions
+The WROOM-32 has 4 MB of flash. Use `partitions-wroom32.csv`, not `partitions.csv` (that one has a 6 MB app slot for the bigger S3 modules).
+The DevKitC's USB-UART usually shows up as `/dev/ttyUSB0` on Linux; adjust the port for your machine.
 
-- Capability version 106; map responses are received uncompressed. Headscale is not supported.
-- Authentication defaults to the approval URL; an auth key is optional and is removed from NVS once registration succeeds.
-- Tailscale ACLs (PacketFilter) are enforced on the receiving side. Every packet is dropped until the filter arrives.
-- The home DERP region is chosen at boot by STUN round-trip time to each region, falling back to `tok` and then to the lowest region ID.
-- Direct paths are established with disco ping/pong and call-me-maybe. The source of an authenticated UDP packet from a peer is also adopted as a path.
-- WireGuard timestamps are corrected with the offset between the system clock and control time, and with SNTP.
-- Network thread stacks live in PSRAM; only the control thread, which writes flash, keeps an internal-RAM stack.
-- The USB host relies on the CDC-ACM host driver's fallback of opening any interface with two bulk endpoints; FTDI, CP210x and CH34x get only their chip-specific setup through vendor control transfers.
+```bash
+cd firmware
+# chip B
+espflash flash --chip esp32 --port /dev/ttyUSB0 --flash-size 4mb \
+  --partition-table partitions-wroom32.csv \
+  target-control/xtensa-esp32-espidf/release/usb-serial-over-tailscale-firmware
+# chip A (plug it in instead, or use its own port)
+espflash flash --chip esp32 --port /dev/ttyUSB0 --flash-size 4mb \
+  --partition-table partitions-wroom32.csv \
+  target-data/xtensa-esp32-espidf/release/usb-serial-over-tailscale-firmware
+```
 
-## Out of scope
+`cargo run` uses the runner in `firmware/.cargo/config.toml`, which is still set up for the S3 board (16 MB flash, `/dev/ttyACM0`). Use the commands above instead.
 
-Secure Boot and flash encryption, OTA, a web management UI, multiple simultaneous connections, USB hubs and a dedicated PCB.
+## Setup
 
-## License
+1. Flash both boards and wire them as above.
+2. Open B's serial port at 115200 baud (`screen /dev/ttyUSB0 115200`) and press Enter. The setup wizard is the same as upstream: Wi-Fi network, hostname, then a Tailscale approval URL (or `authkey tskey-auth-...` followed by `login`).
+3. B forwards the Wi-Fi networks, TCP port and baud rate to A. A stores them and restarts once to start the bridge.
+4. B registers with the node public key that A reported, then keeps A's configuration up to date.
+5. From another machine on the tailnet, connect to the console with any raw TCP client. The upstream article uses socat:
 
-MIT.
-The Tailscale and WireGuard protocol code was written from the protocol descriptions and the Tailscale (BSD-3-Clause) and wireguard-go (MIT) sources.
-The USB-serial baud-rate encodings were written from FTDI's application note AN232B-05, Silicon Labs' AN571, Espressif's esp-usb VCP drivers (Apache-2.0) and FreeBSD's `uftdi` and `uchcom` drivers (BSD-2-Clause).
+   ```bash
+   socat -,rawer,escape=0x1d TCP:target-console:35930   # Ctrl-] to quit
+   ```
+
+`status` on B shows the Tailscale state and whether the data chip is reachable and in sync. `port <n>` and `baud <rate>` change the TCP port (default 35930) and the target baud rate (default 115200).
+
+## Memory estimates
+
+These are estimates, not measurements.
+
+| | B (control) | A (data) |
+| --- | --- | --- |
+| Static DRAM (.data + .bss) | 31.5 KB | 31.5 KB |
+| Heap after Wi-Fi start (assumed) | 180 to 220 KB | 180 to 220 KB |
+| Steady use, stacks + heap | about 95 KB | about 130 KB |
+| Peak use | 150 to 170 KB (map decode) | about 170 KB (DERP TLS handshake + snapshot) |
+
+A is the tight one. Measuring this on hardware is the first thing to do.
+
+## Limitations
+
+- Not verified on hardware (see Status).
+- At most 32 peers and 2 concurrent DERP connections. These limits come from the `lowmem` build used to fit in internal RAM.
+- IPv6 is disabled in lwIP to save memory. Tailnet IPv6 addresses are configured, but the boards only reach the internet over IPv4.
+- One serial port (UART2), not one per USB interface like the upstream S3 version.
+- Wi-Fi passwords are sent in plain text over the link between the chips. It is a short wire between two boards you own, but keep it in mind.
+- A keeps its configuration in RAM only. If A reboots while B is down, A has no peers until B comes back.
+- Peer status shown on B is refreshed every 2 seconds.
+- No reset wiring or watchdog between the two chips yet.
+- The browser flasher and CI in `web/` and `.github/` are from upstream and are for the S3 version.
+
+## Roadmap
+
+Phase 2 is hardware bring-up:
+
+1. Check the UART link with RTS/CTS at 2 Mbit/s on real wires and tune the ACK timeout.
+2. Measure free heap, the largest free block and each thread's stack high-water mark, and replace the estimates above.
+3. Test end to end on a real tailnet: registration, DERP and direct paths, the console bridge, and stopping B while a session is open.
+4. Save A's last configuration to NVS so it survives a reboot while B is down.
+5. Cross-wire EN pins or add a watchdog between the chips.
+
+## Branches
+
+- `esp32-split` (default): the two-chip version described here.
+- `esp32-nopsram`: an attempt to fit everything on one WROOM-32. It builds, but by my estimates its peak memory use does not fit.
+- `esp32-uart-probe`: the first experiment, a single ESP32 (M5StickC Plus2) with a UART instead of USB host.
+- `main`: upstream, unchanged.
+
+## Credit and license
+
+The original design and almost all of the Tailscale implementation (control client, WireGuard, DERP, disco, netstack) are by Tasuku Suzuki in [signal-slot/usb-serial-over-tailscale](https://github.com/signal-slot/usb-serial-over-tailscale). See also his [Zenn article](https://zenn.dev/tasuku/articles/0caef1a822c4e6).
+This fork adds the WROOM-32 port, the control/data split and the link protocol.
+
+The upstream README is kept in [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) ([日本語](docs/UPSTREAM_README-ja.md)).
+
+MIT License, same as upstream. See [LICENSE](LICENSE) (Copyright (c) 2026 Tasuku Suzuki).

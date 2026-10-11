@@ -1,6 +1,6 @@
 //! The chip-to-chip link (control chip B <-> data chip A) on UART1 with
 //! RTS/CTS flow control. Same pins on both chips; the wires cross
-//! (TX->RX, RTS->CTS). See README_split.md.
+//! (TX->RX, RTS->CTS). See docs/split-design.md.
 //!
 //! | signal | GPIO |
 //! |--------|------|

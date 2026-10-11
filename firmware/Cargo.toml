@@ -23,7 +23,7 @@ debug = true
 
 [features]
 default = []
-# Two-chip split (README_split.md). Neither feature: single-chip node.
+# Two-chip split (docs/split-design.md). Neither feature: single-chip node.
 # Control chip "B": Wi-Fi, ts2021 control client, machine key, setup shell.
 role-control = ["tsnode/split", "dep:splitlink"]
 # Data chip "A": Wi-Fi, WireGuard/DERP/disco/ACL/smoltcp, target UART bridge.

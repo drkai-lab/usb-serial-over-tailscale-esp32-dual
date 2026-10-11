@@ -48,7 +48,7 @@ The log lines that look like causes are not causes:
 ## 1. Fix the power (the actual repair)
 
 The COM port supplies the ESP32-S3 and, through the bridged `USB-OTG` pad,
-the Dahlia's FT4232H as well (see "Power and wiring" in README.md). On Lepton
+the Dahlia's FT4232H as well (see "Power and wiring" in docs/UPSTREAM_README.md). On Lepton
 the COM port (CH343, serial `5CF9120331`) sits on a VIA Labs hub (bus 7, port
 1.1). The same hub also feeds a 4K capture device (400 mA), an FT232R and the
 Pi Debug Probe.

@@ -10,7 +10,7 @@
 //!   stays available on UART0 (`status`, `setup`, ...).
 //!
 //! Features `role-control` / `role-data` build the two halves of the
-//! two-chip split instead (README_split.md).
+//! two-chip split instead (docs/split-design.md).
 #![allow(unexpected_cfgs)]
 // Each role uses a subset of the shared modules.
 #![cfg_attr(any(feature = "role-control", feature = "role-data"), allow(dead_code, unused_imports))]

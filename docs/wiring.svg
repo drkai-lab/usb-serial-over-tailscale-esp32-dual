@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" font-family="DejaVu Sans, Arial, sans-serif">
+<defs><marker id="arre8590c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e8590c"/></marker><marker id="arr1c7ed6" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c7ed6"/></marker><marker id="arr2f9e44" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2f9e44"/></marker><marker id="arr9c36b5" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9c36b5"/></marker><marker id="arrf08c00" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#f08c00"/></marker><marker id="arr0c8599" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0c8599"/></marker><marker id="arr111111" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#111111"/></marker></defs>
+<rect width="1600" height="1180" fill="#ffffff"/>
+<text x="800.0" y="48" font-size="30" font-weight="bold" text-anchor="middle" fill="#111">Wiring: two ESP32-WROOM-32 DevKitC boards (control + data split)</text>
+<text x="800.0" y="82" font-size="18" text-anchor="middle" fill="#444">Same pin numbers on both boards; the link wires cross over (TX to RX, RTS to CTS). 3.3 V logic only.</text>
+<rect x="130" y="170" width="330" height="660" rx="14" fill="#1f3b63" stroke="#0b1f3a" stroke-width="3"/>
+<rect x="215.0" y="188" width="160" height="110" rx="6" fill="#c9ced6" stroke="#6b7280" stroke-width="2"/>
+<text x="295.0" y="238" font-size="15" text-anchor="middle" fill="#222">ESP32-</text>
+<text x="295.0" y="258" font-size="15" text-anchor="middle" fill="#222">WROOM-32</text>
+<text x="295.0" y="330" font-size="22" font-weight="bold" text-anchor="middle" fill="#fff">B: control chip</text>
+<text x="295.0" y="356" font-size="15" text-anchor="middle" fill="#dbe4f0">firmware feature role-control</text>
+<rect x="810" y="170" width="330" height="660" rx="14" fill="#1f4d3b" stroke="#0b1f3a" stroke-width="3"/>
+<rect x="895.0" y="188" width="160" height="110" rx="6" fill="#c9ced6" stroke="#6b7280" stroke-width="2"/>
+<text x="975.0" y="238" font-size="15" text-anchor="middle" fill="#222">ESP32-</text>
+<text x="975.0" y="258" font-size="15" text-anchor="middle" fill="#222">WROOM-32</text>
+<text x="975.0" y="330" font-size="22" font-weight="bold" text-anchor="middle" fill="#fff">A: data chip</text>
+<text x="975.0" y="356" font-size="15" text-anchor="middle" fill="#dbe4f0">firmware feature role-data</text>
+<circle cx="460" cy="480" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="446" y="486" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO25 TX</text>
+<circle cx="810" cy="480" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="824" y="486" font-size="17" font-weight="bold" text-anchor="start" fill="#fff">GPIO26 RX</text>
+<line x1="468" y1="480" x2="800" y2="480" stroke="#e8590c" stroke-width="5" stroke-linecap="round" marker-end="url(#arre8590c)" />
+<text x="634.0" y="471" font-size="14" text-anchor="middle" fill="#e8590c" font-weight="bold">B TX → A RX</text>
+<circle cx="460" cy="530" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="446" y="536" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO26 RX</text>
+<circle cx="810" cy="530" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="824" y="536" font-size="17" font-weight="bold" text-anchor="start" fill="#fff">GPIO25 TX</text>
+<line x1="802" y1="530" x2="470" y2="530" stroke="#1c7ed6" stroke-width="5" stroke-linecap="round" marker-end="url(#arr1c7ed6)" />
+<text x="636.0" y="521" font-size="14" text-anchor="middle" fill="#1c7ed6" font-weight="bold">A TX → B RX</text>
+<circle cx="460" cy="580" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="446" y="586" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO33 RTS</text>
+<circle cx="810" cy="580" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="824" y="586" font-size="17" font-weight="bold" text-anchor="start" fill="#fff">GPIO32 CTS</text>
+<line x1="468" y1="580" x2="800" y2="580" stroke="#2f9e44" stroke-width="5" stroke-linecap="round" marker-end="url(#arr2f9e44)" />
+<text x="634.0" y="571" font-size="14" text-anchor="middle" fill="#2f9e44" font-weight="bold">B RTS → A CTS</text>
+<circle cx="460" cy="630" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="446" y="636" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO32 CTS</text>
+<circle cx="810" cy="630" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="824" y="636" font-size="17" font-weight="bold" text-anchor="start" fill="#fff">GPIO33 RTS</text>
+<line x1="802" y1="630" x2="470" y2="630" stroke="#9c36b5" stroke-width="5" stroke-linecap="round" marker-end="url(#arr9c36b5)" />
+<text x="636.0" y="621" font-size="14" text-anchor="middle" fill="#9c36b5" font-weight="bold">A RTS → B CTS</text>
+<circle cx="460" cy="710" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="446" y="716" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GND</text>
+<circle cx="810" cy="710" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="824" y="716" font-size="17" font-weight="bold" text-anchor="start" fill="#fff">GND</text>
+<line x1="468" y1="710" x2="802" y2="710" stroke="#111111" stroke-width="6" stroke-linecap="round"  />
+<text x="635.0" y="701" font-size="14" text-anchor="middle" fill="#111111" font-weight="bold">GND (common, required)</text>
+<text x="635.0" y="420" font-size="19" font-weight="bold" text-anchor="middle" fill="#111">Link: UART1, 2 Mbit/s, RTS/CTS</text>
+<text x="635.0" y="444" font-size="15" text-anchor="middle" fill="#444">keep these wires under 20 cm</text>
+<rect x="1380" y="430" width="190" height="330" rx="12" fill="#f1f3f5" stroke="#495057" stroke-width="3"/>
+<text x="1475.0" y="470" font-size="20" font-weight="bold" text-anchor="middle" fill="#111">Target</text>
+<text x="1475.0" y="494" font-size="14" text-anchor="middle" fill="#444">serial console</text>
+<text x="1475.0" y="514" font-size="14" text-anchor="middle" fill="#444">3.3 V UART</text>
+<circle cx="1140" cy="540" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1126" y="546" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO17 TX</text>
+<circle cx="1380" cy="540" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1394" y="546" font-size="17" font-weight="bold" fill="#111">RX</text>
+<line x1="1148" y1="540" x2="1370" y2="540" stroke="#f08c00" stroke-width="5" stroke-linecap="round" marker-end="url(#arrf08c00)" />
+<text x="1259.0" y="531" font-size="14" text-anchor="middle" fill="#f08c00" font-weight="bold">A TX → target RX</text>
+<circle cx="1140" cy="610" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1126" y="616" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GPIO16 RX</text>
+<circle cx="1380" cy="610" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1394" y="616" font-size="17" font-weight="bold" fill="#111">TX</text>
+<line x1="1372" y1="610" x2="1150" y2="610" stroke="#0c8599" stroke-width="5" stroke-linecap="round" marker-end="url(#arr0c8599)" />
+<text x="1261.0" y="601" font-size="14" text-anchor="middle" fill="#0c8599" font-weight="bold">target TX → A RX</text>
+<circle cx="1140" cy="690" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1126" y="696" font-size="17" font-weight="bold" text-anchor="end" fill="#fff">GND</text>
+<circle cx="1380" cy="690" r="7" fill="#f3c74f" stroke="#7a5a00" stroke-width="2"/>
+<text x="1394" y="696" font-size="17" font-weight="bold" fill="#111">GND</text>
+<line x1="1148" y1="690" x2="1372" y2="690" stroke="#111111" stroke-width="6" stroke-linecap="round"  />
+<text x="1260.0" y="681" font-size="14" text-anchor="middle" fill="#111111" font-weight="bold">GND (common)</text>
+<text x="1260.0" y="800" font-size="15" text-anchor="middle" fill="#444">UART2 on A</text>
+<rect x="260.0" y="820" width="70" height="30" rx="4" fill="#adb5bd" stroke="#495057" stroke-width="2"/>
+<text x="295.0" y="808" font-size="15" text-anchor="middle" fill="#fff">USB (UART0: GPIO1/3)</text>
+<rect x="150" y="720" width="46" height="34" rx="5" fill="#212529" stroke="#adb5bd" stroke-width="2"/>
+<circle cx="173" cy="737" r="10" fill="#495057"/>
+<text x="206" y="734" font-size="15" fill="#fff">BOOT = GPIO0</text>
+<text x="206" y="753" font-size="13" fill="#dbe4f0">hold at power-on: setup mode</text>
+<path d="M295.0,850 L295.0,910" stroke="#495057" stroke-width="6" fill="none"/>
+<rect x="165.0" y="910" width="260" height="80" rx="10" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="2"/>
+<text x="295.0" y="940" font-size="18" font-weight="bold" text-anchor="middle" fill="#111">PC</text>
+<text x="295.0" y="964" font-size="14" text-anchor="middle" fill="#333">power + setup shell + logs</text>
+<rect x="940.0" y="820" width="70" height="30" rx="4" fill="#adb5bd" stroke="#495057" stroke-width="2"/>
+<text x="975.0" y="808" font-size="15" text-anchor="middle" fill="#fff">USB (UART0: logs)</text>
+<path d="M975.0,850 L975.0,910" stroke="#495057" stroke-width="6" fill="none"/>
+<rect x="845.0" y="910" width="260" height="80" rx="10" fill="#ebfbee" stroke="#2f9e44" stroke-width="2"/>
+<text x="975.0" y="940" font-size="18" font-weight="bold" text-anchor="middle" fill="#111">USB power</text>
+<text x="975.0" y="964" font-size="14" text-anchor="middle" fill="#333">charger or PC (logs optional)</text>
+<text x="295.0" y="152" font-size="15" text-anchor="middle" fill="#555">Wi-Fi → tailnet</text>
+<text x="975.0" y="152" font-size="15" text-anchor="middle" fill="#555">Wi-Fi → tailnet</text>
+<text x="295.0" y="395" font-size="14" text-anchor="middle" fill="#dbe4f0">ts2021 control, map stream,</text>
+<text x="295.0" y="415" font-size="14" text-anchor="middle" fill="#dbe4f0">machine key, setup shell</text>
+<text x="975.0" y="395" font-size="14" text-anchor="middle" fill="#dbe4f0">WireGuard (node key), DERP,</text>
+<text x="975.0" y="415" font-size="14" text-anchor="middle" fill="#dbe4f0">disco/STUN, ACL, TCP bridge</text>
+<rect x="1280" y="900" width="290" height="260" rx="10" fill="#ffffff" stroke="#868e96" stroke-width="2"/>
+<text x="1296" y="930" font-size="17" font-weight="bold" fill="#111">Legend</text>
+<line x1="1296" y1="958" x2="1340" y2="958" stroke="#e8590c" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="963" font-size="14" fill="#222">link data B → A</text>
+<line x1="1296" y1="986" x2="1340" y2="986" stroke="#1c7ed6" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="991" font-size="14" fill="#222">link data A → B</text>
+<line x1="1296" y1="1014" x2="1340" y2="1014" stroke="#2f9e44" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="1019" font-size="14" fill="#222">flow control B RTS → A CTS</text>
+<line x1="1296" y1="1042" x2="1340" y2="1042" stroke="#9c36b5" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="1047" font-size="14" fill="#222">flow control A RTS → B CTS</text>
+<line x1="1296" y1="1070" x2="1340" y2="1070" stroke="#f08c00" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="1075" font-size="14" fill="#222">A TX → target RX</text>
+<line x1="1296" y1="1098" x2="1340" y2="1098" stroke="#0c8599" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="1103" font-size="14" fill="#222">target TX → A RX</text>
+<line x1="1296" y1="1126" x2="1340" y2="1126" stroke="#111111" stroke-width="5" stroke-linecap="round"/>
+<text x="1350" y="1131" font-size="14" fill="#222">ground</text>
+<text x="560" y="1000" font-size="17" font-weight="bold" fill="#222">Notes</text>
+<text x="560" y="1026" font-size="15" font-weight="normal" fill="#222">• Power each board from its own USB port. Do not tie 3V3 or 5V together.</text>
+<text x="560" y="1052" font-size="15" font-weight="normal" fill="#222">• GND must be common: B–A and A–target.</text>
+<text x="560" y="1078" font-size="15" font-weight="normal" fill="#222">• 3.3 V signals only. Use a level shifter for 5 V or RS-232 targets.</text>
+<text x="560" y="1104" font-size="15" font-weight="normal" fill="#222">• Avoided: GPIO6–11 (flash) and strapping pins 2, 5, 12, 15.</text>
+<text x="560" y="1130" font-size="15" font-weight="normal" fill="#222">• GPIO32/33 assume no 32 kHz crystal (DevKitC has none).</text>
+<text x="560" y="1156" font-size="15" font-weight="normal" fill="#222">• Pins match firmware/src/link_uart.rs and role_data.rs.</text>
+</svg>

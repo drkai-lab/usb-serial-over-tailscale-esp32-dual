@@ -324,7 +324,7 @@ fn stack_for(name: &str, stack: usize) -> usize {
         "magicsock-tick" => 8 * 1024,
         // NetStack::start closure 2.0 KB + smoltcp poll 0.8 KB + encapsulate.
         "netstack" => 10 * 1024,
-        // Two-chip split (estimates; see README_split.md).
+        // Two-chip split (estimates; see docs/split-design.md).
         "splitlink-rx" => 6 * 1024,
         // A: DInner::handle 3.4 KB + apply_snapshot 3.1 KB frames, then
         // magicsock/Filter::compile, or key generation + NVS write.

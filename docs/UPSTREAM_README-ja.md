@@ -1,10 +1,14 @@
+> **注記(フォーク)**: これは Tasuku Suzuki さんによる元の ESP32-S3 版の README を参考として残したものです。
+> このフォークの `esp32-split` ブランチは ESP32-WROOM-32 2 枚構成向けで、S3 の USB ホストモードは含んでいません。
+> S3 版は本家リポジトリを使ってください: https://github.com/signal-slot/usb-serial-over-tailscale
+
 # usb-serial-over-tailscale
 
-[English](README.md)
+[English](UPSTREAM_README.md)
 
 PSRAM 付きの ESP32-S3 単体で Tailnet に参加し、対象 SBC の USB シリアルコンソールを Tailnet 上の TCP ポートに中継するアダプタである。
 
-![ノート PC から Tailscale 経由で対象ボードのシリアルコンソールに届く。ESP32-S3 は USB 充電器から給電し、対象の USB ポートに挿す](web/overview.webp)
+![ノート PC から Tailscale 経由で対象ボードのシリアルコンソールに届く。ESP32-S3 は USB 充電器から給電し、対象の USB ポートに挿す](../web/overview.webp)
 
 ```text
 Remote PC ──Tailscale / TCP:35930+n──▶ ESP32-S3 ──USB host──▶ 対象 SBC のシリアルインターフェース n
