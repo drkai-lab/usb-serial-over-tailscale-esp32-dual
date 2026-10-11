@@ -2,13 +2,12 @@
 //! exposes status plus TCP listeners on the node's tailnet address.
 
 use crate::control::{hostinfo, ControlClient};
-use crate::filter::Filter;
+use crate::dataplane::{load_or_create_key, DataPlane, LocalConfig, LocalDataPlane};
 use crate::keys::{fmt_disco_pub, fmt_node_pub, parse_prefixed, KeyPair, NODE_PUB_PREFIX};
-use crate::magicsock::{MagicSock, PeerStatus};
+use crate::magicsock::PeerStatus;
 use crate::net::Dialer;
 use crate::netstack::{NetStack, TcpListener};
 use crate::types::*;
-use crate::wireguard::WALL_CLOCK_OFFSET_SECS;
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::io;
@@ -99,9 +98,7 @@ struct Inner {
     cfg: NodeConfig,
     store: Arc<dyn Store>,
     dialer: Arc<dyn Dialer>,
-    magicsock: MagicSock,
-    netstack: NetStack,
-    node_key: Mutex<KeyPair>,
+    dp: Arc<dyn DataPlane>,
     machine_key: KeyPair,
     status: Mutex<NodeStatus>,
     shutdown: AtomicBool,
@@ -116,59 +113,42 @@ pub struct Node {
     inner: Arc<Inner>,
 }
 
-fn load_or_create_key(store: &dyn Store, name: &str) -> io::Result<KeyPair> {
-    if let Some(v) = store.get(name) {
-        if let Some(k) = KeyPair::from_secret_hex(&v) {
-            return Ok(k);
-        }
-        warn!("node: stored {name} is invalid; regenerating");
-    }
-    let k = KeyPair::generate();
-    store.set(name, &k.secret_hex())?;
-    Ok(k)
-}
-
 impl Node {
     pub fn start(
         cfg: NodeConfig,
         store: Arc<dyn Store>,
         dialer: Arc<dyn Dialer>,
     ) -> io::Result<Node> {
-        let machine_key = load_or_create_key(store.as_ref(), KEY_MACHINE)?;
-        let node_key = load_or_create_key(store.as_ref(), KEY_NODE)?;
-        let disco_key = load_or_create_key(store.as_ref(), KEY_DISCO)?;
-        info!(
-            "node: machine {} node {}",
-            crate::keys::short(machine_key.public()),
-            crate::keys::short(node_key.public())
-        );
-
         let spawner = cfg.spawner.clone().unwrap_or_else(crate::net::std_spawner);
-        let magicsock = MagicSock::start(
-            node_key.clone(),
-            disco_key,
+        let dp = LocalDataPlane::start(
+            LocalConfig {
+                udp_port: cfg.udp_port,
+                local_ip: cfg.local_ip,
+                worker_stack: cfg.worker_stack,
+                spawner,
+            },
+            store.clone(),
             dialer.clone(),
-            cfg.udp_port,
-            cfg.local_ip,
-            cfg.worker_stack,
-            spawner.clone(),
         )?;
-        let ms = magicsock.clone();
-        let netstack = NetStack::start(
-            Box::new(move |pkt| ms.send_ip(&pkt)),
-            cfg.worker_stack,
-            &spawner,
-        )?;
-        let ns = netstack.clone();
-        magicsock.set_ip_sink(Arc::new(move |pkt| ns.inject(pkt)));
+        Self::start_with_dataplane(cfg, store, dialer, dp)
+    }
 
+    /// Runs the control plane against an arbitrary data plane (in-process or
+    /// on another chip). Only the machine key is loaded from `store`.
+    pub fn start_with_dataplane(
+        cfg: NodeConfig,
+        store: Arc<dyn Store>,
+        dialer: Arc<dyn Dialer>,
+        dp: Arc<dyn DataPlane>,
+    ) -> io::Result<Node> {
+        let machine_key = load_or_create_key(store.as_ref(), KEY_MACHINE)?;
+        info!("node: machine {}", crate::keys::short(machine_key.public()));
+        let spawner = cfg.spawner.clone().unwrap_or_else(crate::net::std_spawner);
         let inner = Arc::new(Inner {
             cfg,
             store,
             dialer,
-            magicsock,
-            netstack,
-            node_key: Mutex::new(node_key),
+            dp,
             machine_key,
             status: Mutex::new(NodeStatus {
                 state: NodeState::Starting,
@@ -190,7 +170,7 @@ impl Node {
             inner: inner.clone(),
         };
         let flag = inner.clone();
-        inner.magicsock.set_endpoints_changed(Arc::new(move || {
+        inner.dp.set_endpoints_changed(Arc::new(move || {
             flag.endpoints_dirty.store(true, Ordering::Relaxed)
         }));
         let ctl = node.clone();
@@ -204,25 +184,37 @@ impl Node {
 
     pub fn status(&self) -> NodeStatus {
         let mut s = self.inner.status.lock().unwrap().clone();
-        s.peers = self.inner.magicsock.peer_status();
-        s.endpoints = self.inner.magicsock.local_endpoints();
-        s.home_derp = self.inner.magicsock.home_derp();
-        s.derp_connected = s.home_derp != 0 && self.inner.magicsock.derp_connected(s.home_derp);
+        let dp = &self.inner.dp;
+        s.peers = dp.peer_status();
+        s.endpoints = dp.local_endpoints();
+        s.home_derp = dp.home_derp();
+        s.derp_connected = s.home_derp != 0 && dp.derp_connected(s.home_derp);
         s
     }
 
+    /// Listens on the tailnet address. Panics when the data plane (and so
+    /// the TCP stack) lives on another chip.
     pub fn listen(&self, port: u16) -> TcpListener {
-        self.inner.netstack.listen(port)
+        self.netstack().expect("netstack is not in this process").listen(port)
     }
 
-    pub fn netstack(&self) -> &NetStack {
-        &self.inner.netstack
+    pub fn netstack(&self) -> Option<&NetStack> {
+        self.inner.dp.netstack()
+    }
+
+    pub fn dataplane(&self) -> &Arc<dyn DataPlane> {
+        &self.inner.dp
+    }
+
+    /// Feeds a map response as if it came from control (tests, fixtures).
+    #[doc(hidden)]
+    pub fn inject_map_response(&self, resp: MapResponse) {
+        self.handle_map_response(resp)
     }
 
     pub fn shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::Relaxed);
-        self.inner.magicsock.shutdown();
-        self.inner.netstack.shutdown();
+        self.inner.dp.shutdown();
     }
 
     fn set_state(&self, state: NodeState) {
@@ -248,6 +240,9 @@ impl Node {
     fn control_loop(&self) {
         let mut backoff = Duration::from_secs(2);
         let inner = &self.inner;
+        while !inner.shutdown.load(Ordering::Relaxed) && !inner.dp.ready() {
+            std::thread::sleep(Duration::from_millis(200));
+        }
         while !inner.shutdown.load(Ordering::Relaxed) {
             self.set_state(NodeState::ConnectingControl);
             let client = match ControlClient::connect(
@@ -309,11 +304,11 @@ impl Node {
     /// Returns `Ok(true)` when authorized, `Ok(false)` when waiting for approval.
     fn register(&self, client: &ControlClient) -> io::Result<bool> {
         let inner = &self.inner;
-        let node_key = inner.node_key.lock().unwrap().clone();
+        let node_pub = inner.dp.node_public();
         let auth = inner.cfg.auth_key.clone().filter(|k| !k.is_empty());
         let req = RegisterRequest {
             version: CAPABILITY_VERSION,
-            node_key: fmt_node_pub(node_key.public()),
+            node_key: fmt_node_pub(&node_pub),
             old_node_key: fmt_node_pub(&[0u8; 32]),
             auth: auth.map(|k| RegisterResponseAuth { auth_key: k }),
             expiry: ZERO_TIME.into(),
@@ -327,17 +322,15 @@ impl Node {
         }
         if resp.node_key_expired {
             info!("node: node key expired; rotating");
-            let new_key = KeyPair::generate();
+            let new_pub = inner.dp.propose_node_key()?;
             let mut req2 = req.clone();
             req2.old_node_key = req.node_key.clone();
-            req2.node_key = fmt_node_pub(new_key.public());
+            req2.node_key = fmt_node_pub(&new_pub);
             let resp2 = client.register(&req2)?;
             if !resp2.error.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, resp2.error));
             }
-            inner.store.set(KEY_NODE, &new_key.secret_hex())?;
-            *inner.node_key.lock().unwrap() = new_key.clone();
-            inner.magicsock.set_node_key(new_key);
+            inner.dp.commit_node_key(new_pub)?;
             return Ok(resp2.machine_authorized);
         }
         if resp.machine_authorized {
@@ -354,22 +347,22 @@ impl Node {
 
     fn map_request(&self, stream: bool) -> MapRequest {
         let inner = &self.inner;
-        let node_key = inner.node_key.lock().unwrap().clone();
-        let home = inner.magicsock.home_derp();
+        let node_pub = inner.dp.node_public();
+        let home = inner.dp.home_derp();
         let mut hi = hostinfo(&inner.cfg.hostname, &inner.cfg.version, home);
         if let Some(ni) = hi.net_info.as_mut() {
-            ni.derp_latency = inner.magicsock.derp_latency();
+            ni.derp_latency = inner.dp.derp_latency();
         }
         MapRequest {
             version: CAPABILITY_VERSION,
             compress: String::new(),
             keep_alive: stream,
-            node_key: fmt_node_pub(node_key.public()),
-            disco_key: fmt_disco_pub(inner.magicsock.disco_public()),
+            node_key: fmt_node_pub(&node_pub),
+            disco_key: fmt_disco_pub(&inner.dp.disco_public()),
             stream,
             hostinfo: hi,
             endpoints: inner
-                .magicsock
+                .dp
                 .local_endpoints()
                 .iter()
                 .map(|e| e.to_string())
@@ -382,13 +375,13 @@ impl Node {
     fn run_map_stream(&self, client: &ControlClient) -> io::Result<()> {
         let inner = &self.inner;
         // Reconnect to the last known home DERP early so peers can reach us.
-        if inner.magicsock.home_derp() == 0 {
+        if inner.dp.home_derp() == 0 {
             if let Some(r) = inner
                 .store
                 .get(KEY_HOME_DERP)
                 .and_then(|v| v.parse::<i32>().ok())
             {
-                inner.magicsock.connect_home_derp(r);
+                inner.dp.connect_home_derp(r);
             }
         }
         let req = self.map_request(true);
@@ -442,7 +435,7 @@ impl Node {
                 debug!(
                     "node: endpoint update {:?} derp {}",
                     lite.endpoints,
-                    inner.magicsock.home_derp()
+                    inner.dp.home_derp()
                 );
                 if let Err(e) = client.map_once(&lite) {
                     warn!("node: endpoint update failed: {e}");
@@ -472,10 +465,9 @@ impl Node {
             if offset.abs() > 5 {
                 debug!("node: clock offset from control time: {offset}s");
             }
-            WALL_CLOCK_OFFSET_SECS.store(
-                offset.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                Ordering::Relaxed,
-            );
+            inner
+                .dp
+                .set_clock_offset(offset.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         }
         if let Some(node) = &resp.node {
             let mut addrs = Vec::new();
@@ -488,7 +480,7 @@ impl Node {
                     cidrs.push((ip, prefix));
                 }
             }
-            inner.netstack.set_addresses(cidrs);
+            inner.dp.set_addresses(cidrs);
             let mut s = inner.status.lock().unwrap();
             if s.addresses != addrs {
                 info!("node: addresses {:?}", addrs);
@@ -498,26 +490,26 @@ impl Node {
         }
         if let Some(map) = resp.derp_map {
             let regions = map.regions.len();
-            inner.magicsock.set_derp_map(map);
+            inner.dp.set_derp_map(map);
             debug!("node: DERP map with {regions} regions");
-            let known = inner.magicsock.home_derp();
+            let known = inner.dp.home_derp();
             if known != 0 {
                 // Home region was restored from the store before the map
                 // arrived; (re)connect now that the region's nodes are known.
-                inner.magicsock.connect_home_derp(known);
+                inner.dp.connect_home_derp(known);
                 inner.endpoints_dirty.store(true, Ordering::Relaxed);
             } else {
                 let home = inner
-                    .magicsock
+                    .dp
                     .probe_derp_regions(Duration::from_millis(1500))
                     .or_else(|| {
                         inner
-                            .magicsock
+                            .dp
                             .fallback_region(&inner.cfg.fallback_region_code)
                     });
                 if let Some(r) = home {
                     info!("node: home DERP region {r}");
-                    inner.magicsock.connect_home_derp(r);
+                    inner.dp.connect_home_derp(r);
                     let _ = inner.store.set(KEY_HOME_DERP, &r.to_string());
                     inner.endpoints_dirty.store(true, Ordering::Relaxed);
                 }
@@ -532,7 +524,7 @@ impl Node {
                 }
             }
             drop(by_id);
-            inner.magicsock.set_peers(peers);
+            inner.dp.set_peers(peers);
             info!("node: {} peers", peers.len());
         }
         if let Some(changed) = &resp.peers_changed {
@@ -543,19 +535,19 @@ impl Node {
                 }
             }
             drop(by_id);
-            inner.magicsock.peers_changed(changed);
+            inner.dp.peers_changed(changed);
         }
         if let Some(removed) = &resp.peers_removed {
             let mut by_id = inner.nodes_by_id.lock().unwrap();
             let snapshot = by_id.clone();
-            inner.magicsock.peers_removed(removed, &snapshot);
+            inner.dp.peers_removed(removed, &snapshot);
             for id in removed {
                 by_id.remove(id);
             }
         }
         if let Some(patches) = &resp.peers_changed_patch {
             let by_id = inner.nodes_by_id.lock().unwrap().clone();
-            inner.magicsock.apply_patches(patches, &by_id);
+            inner.dp.apply_patches(patches, &by_id);
         }
         // ACL: the legacy field replaces everything; the named sets are
         // merged (a null entry deletes that set).
@@ -584,7 +576,7 @@ impl Node {
             let sets = inner.filter_sets.lock().unwrap();
             let all: Vec<FilterRule> = sets.values().flatten().cloned().collect();
             debug!("node: packet filter with {} rules", all.len());
-            inner.magicsock.set_packet_filter(Filter::compile(&all));
+            inner.dp.set_packet_filter(&all);
         }
         if let Some(h) = &resp.health {
             for m in h {
@@ -594,6 +586,7 @@ impl Node {
         if resp.ping_request.is_some() {
             debug!("node: ignoring control PingRequest");
         }
+        inner.dp.commit();
     }
 }
 

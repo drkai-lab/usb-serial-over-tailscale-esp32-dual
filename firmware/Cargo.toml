@@ -23,6 +23,11 @@ debug = true
 
 [features]
 default = []
+# Two-chip split (README_split.md). Neither feature: single-chip node.
+# Control chip "B": Wi-Fi, ts2021 control client, machine key, setup shell.
+role-control = ["tsnode/split", "dep:splitlink"]
+# Data chip "A": Wi-Fi, WireGuard/DERP/disco/ACL/smoltcp, target UART bridge.
+role-data = ["tsnode/split", "dep:splitlink"]
 
 [dependencies]
 esp-idf-svc = { version = "0.52", features = ["std", "alloc", "binstart", "critical-section"] }
@@ -30,6 +35,7 @@ esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
 tsnode = { path = "../crates/tsnode", features = ["lowmem"] }
 adapter-core = { path = "../crates/adapter-core" }
+splitlink = { path = "../crates/splitlink", optional = true }
 log = "0.4"
 anyhow = "1"
 

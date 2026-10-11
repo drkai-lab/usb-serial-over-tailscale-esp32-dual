@@ -10,6 +10,7 @@
 pub mod control;
 pub mod controlbase;
 pub mod crypto;
+pub mod dataplane;
 pub mod derp;
 pub mod disco;
 pub mod filter;
@@ -22,6 +23,8 @@ pub mod net;
 pub mod netstack;
 pub mod node;
 pub mod noise;
+#[cfg(feature = "split")]
+pub mod split;
 pub mod stun;
 pub mod types;
 pub mod wireguard;

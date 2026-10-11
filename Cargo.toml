@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tsnode", "crates/adapter-core", "tools/hostnode"]
+members = ["crates/tsnode", "crates/adapter-core", "crates/splitlink", "tools/hostnode"]
 # The firmware crate targets xtensa-esp32s3-espidf and carries its own toolchain
 # and .cargo/config; it is built separately from firmware/.
 exclude = ["firmware"]

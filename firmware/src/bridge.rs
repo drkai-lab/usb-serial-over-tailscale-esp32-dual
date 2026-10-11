@@ -17,11 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
-use tsnode::netstack::TcpStream;
-use tsnode::node::Node;
+use tsnode::netstack::{TcpListener, TcpStream};
 
-pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
-    let listener = node.listen(port);
+pub fn run(listener: TcpListener, serial: UsbSerial, port: u16) -> Result<()> {
     info!("bridge: listening on tailnet port {port}");
     let busy = Arc::new(AtomicBool::new(false));
     let accept_busy = busy.clone();

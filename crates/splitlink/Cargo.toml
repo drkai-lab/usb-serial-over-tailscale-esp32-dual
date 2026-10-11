@@ -1,0 +1,11 @@
+[package]
+name = "splitlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reliable framed link (COBS + CRC32 + seq/ACK) and messages between the control chip and the data chip of a split tsnode"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+log = "0.4"

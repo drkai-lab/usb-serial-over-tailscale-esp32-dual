@@ -19,6 +19,9 @@ pub struct EspPlatform {
     /// The USB host, set once it is started (normal mode only).
     pub usb: OnceLock<UsbHost>,
     pub setup_mode: bool,
+    /// The data chip, driven over the UART1 link (two-chip split).
+    #[cfg(feature = "role-control")]
+    pub remote: OnceLock<Arc<tsnode::split::RemoteDataPlane>>,
 }
 
 impl EspPlatform {
@@ -108,6 +111,12 @@ impl Platform for EspPlatform {
             node: Some(self.node_state()),
             derp,
             peers,
+            #[cfg(feature = "role-control")]
+            usb: match self.remote.get() {
+                Some(r) => crate::role_control::describe(r),
+                None => "data chip: link not started".into(),
+            },
+            #[cfg(not(feature = "role-control"))]
             usb: match self.usb.get() {
                 Some(h) => h.describe(),
                 None if self.setup_mode => "off (setup mode)".into(),
@@ -146,6 +155,10 @@ impl Platform for EspPlatform {
     fn save_config(&self, cfg: &SavedConfig) -> Result<(), String> {
         nvs_store::save_config(self.store.as_ref(), cfg).map_err(|e| e.to_string())?;
         self.wifi.set_networks(cfg.networks.clone());
+        #[cfg(feature = "role-control")]
+        if let Some(r) = self.remote.get() {
+            r.set_device_config(crate::role_control::device_config(cfg));
+        }
         Ok(())
     }
 
@@ -155,10 +168,19 @@ impl Platform for EspPlatform {
             return Ok(());
         }
         let cfg = self.config().ok_or("not configured")?;
+        #[cfg(not(feature = "role-control"))]
         let node = Node::start(
             Self::node_config(&cfg),
             self.store.clone(),
             Arc::new(EspDialer),
+        )
+        .map_err(|e| e.to_string())?;
+        #[cfg(feature = "role-control")]
+        let node = Node::start_with_dataplane(
+            Self::node_config(&cfg),
+            self.store.clone(),
+            Arc::new(EspDialer),
+            self.remote.get().ok_or("link to the data chip not started")?.clone(),
         )
         .map_err(|e| e.to_string())?;
         if cfg.auth_key.is_some() {
@@ -280,7 +302,8 @@ pub fn last_reset() -> ResetReason {
 /// the flash cache is disabled during writes; only the control thread does.
 pub fn spawner() -> Spawner {
     Arc::new(|name: &str, stack: usize, f: Box<dyn FnOnce() + Send>| {
-        spawn_thread(name, stack_for(name, stack), name != "control", f)
+        // control and split-ev (A: node key commit) write NVS.
+        spawn_thread(name, stack_for(name, stack), name != "control" && name != "split-ev", f)
     })
 }
 
@@ -301,6 +324,16 @@ fn stack_for(name: &str, stack: usize) -> usize {
         "magicsock-tick" => 8 * 1024,
         // NetStack::start closure 2.0 KB + smoltcp poll 0.8 KB + encapsulate.
         "netstack" => 10 * 1024,
+        // Two-chip split (estimates; see README_split.md).
+        "splitlink-rx" => 6 * 1024,
+        // A: DInner::handle 3.4 KB + apply_snapshot 3.1 KB frames, then
+        // magicsock/Filter::compile, or key generation + NVS write.
+        // B: postcard decode only.
+        "split-ev" => if cfg!(feature = "role-data") { 16 * 1024 } else { 6 * 1024 },
+        // B: builds and encodes the snapshot.
+        "split-tx" => 8 * 1024,
+        // A: status + peer status (postcard encode).
+        "split-status" => 8 * 1024,
         _ => stack,
     }
 }

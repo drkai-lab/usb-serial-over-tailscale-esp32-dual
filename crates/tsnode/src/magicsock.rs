@@ -258,8 +258,25 @@ impl MagicSock {
                     .unwrap_or(false),
             })
             .collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
+        // Unstable sort: the stable one reserves a 4 KB scratch buffer on the
+        // stack, too much for the 4-8 KB status threads on the ESP32.
+        v.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         v
+    }
+
+    /// Like [`MagicSock::peer_status`] with each peer's full public key.
+    pub fn peer_status_full(&self) -> Vec<([u8; 32], PeerStatus)> {
+        let keys: Vec<[u8; 32]> = {
+            let st = self.inner.state.lock().unwrap();
+            st.peers.keys().copied().collect()
+        };
+        let all = self.peer_status();
+        keys.into_iter()
+            .filter_map(|k| {
+                let ks = short(&k);
+                all.iter().find(|p| p.key_short == ks).cloned().map(|p| (k, p))
+            })
+            .collect()
     }
 
     // ---- Control-plane driven configuration ----

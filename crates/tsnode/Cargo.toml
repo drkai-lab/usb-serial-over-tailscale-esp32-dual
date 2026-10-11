@@ -9,8 +9,11 @@ description = "Minimal userspace Tailscale node: ts2021 control client, WireGuar
 # Smaller buffers, streaming map decode and caps on peers/DERP connections
 # for targets without PSRAM (plain ESP32-WROOM-32).
 lowmem = []
+# Control/data split across two chips (RemoteDataPlane, DataServer).
+split = ["dep:splitlink"]
 
 [dependencies]
+splitlink = { path = "../splitlink", optional = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
 blake2 = "0.10"
@@ -26,3 +29,8 @@ smoltcp = { version = "0.12", default-features = false, features = ["std", "log"
 
 [dev-dependencies]
 env_logger = "0.11"
+splitlink = { path = "../splitlink" }
+
+[[test]]
+name = "split"
+required-features = ["split"]
