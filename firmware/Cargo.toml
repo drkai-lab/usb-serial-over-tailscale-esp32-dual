@@ -36,7 +36,4 @@ embuild = "0.33"
 [package.metadata.esp-idf-sys]
 esp_idf_tools_install_dir = "workspace"
 # Default module variant; CI overrides this with ESP_IDF_SDKCONFIG_DEFAULTS.
-esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "variants/n16r8.defaults"]
-extra_components = [
-  { remote_component = { name = "espressif/usb_host_cdc_acm", version = "2.4.1" }, bindings_header = "bindings.h", bindings_module = "usb" },
-]
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "variants/m5stickc-plus2.defaults"]

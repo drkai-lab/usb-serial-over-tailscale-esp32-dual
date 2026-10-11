@@ -3,7 +3,7 @@
 
 use crate::nvs_store::{self, NvsStore};
 use crate::tls::EspDialer;
-use crate::usb_host::UsbHost;
+use crate::uart_serial::UartSerial as UsbHost;
 use crate::wifi::WifiManager;
 use adapter_core::shell::{ApInfo, NodeState, Platform, SavedConfig, StatusSnapshot};
 use esp_idf_svc::sys;
@@ -109,8 +109,8 @@ impl Platform for EspPlatform {
             derp,
             peers,
             usb: match self.usb.get() {
-                Some(h) => format!("{} ({})", h.describe(), crate::usb_host::root_port_state()),
-                None if self.setup_mode => "device mode (setup console)".into(),
+                Some(h) => h.describe(),
+                None if self.setup_mode => "off (setup mode)".into(),
                 None => "starting".into(),
             },
             heap,

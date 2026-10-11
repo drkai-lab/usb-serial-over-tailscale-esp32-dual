@@ -2,7 +2,7 @@
 # Flash size and PSRAM mode come from variants/<module>.defaults (see
 # ESP_IDF_SDKCONFIG_DEFAULTS in Cargo.toml and the CI matrix). PSRAM is
 # required: network thread stacks and TLS buffers live there.
-CONFIG_IDF_TARGET="esp32s3"
+CONFIG_IDF_TARGET="esp32"
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_80M=y

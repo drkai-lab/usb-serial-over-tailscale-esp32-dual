@@ -16,7 +16,7 @@ mod console;
 mod nvs_store;
 mod platform;
 mod tls;
-mod usb_host;
+mod uart_serial;
 mod wifi;
 
 use adapter_core::shell::{Platform, Shell, DEFAULT_TCP_PORT};
@@ -50,17 +50,23 @@ fn main() -> Result<()> {
     let nvs_part = EspDefaultNvsPartition::take()?;
     let store = Arc::new(nvs_store::NvsStore::open(nvs_part.clone(), "tsusb")?);
 
-    // UART0 (GPIO43/44 on ESP32-S3) for the shell; log output shares the pins.
+    // M5StickC Plus2: HOLD (GPIO4) must go high right away or the board
+    // powers itself off when running from the battery.
+    let mut hold = esp_idf_svc::hal::gpio::PinDriver::output(peripherals.pins.gpio4)?;
+    hold.set_high()?;
+    core::mem::forget(hold);
+
+    // UART0 (GPIO1/3 on ESP32, wired to the CH9102 USB-UART) for the shell.
     let uart = UartDriver::new(
         peripherals.uart0,
-        peripherals.pins.gpio43,
-        peripherals.pins.gpio44,
+        peripherals.pins.gpio1,
+        peripherals.pins.gpio3,
         Option::<AnyIOPin>::None,
         Option::<AnyIOPin>::None,
         &Default::default(),
     )?;
 
-    let mut boot_button = button::Button::new(peripherals.pins.gpio0)?;
+    let mut boot_button = button::Button::new(peripherals.pins.gpio37)?;
     let setup_requested = boot_button.held_at_boot();
 
     let config = nvs_store::load_config(store.as_ref());
@@ -86,21 +92,6 @@ fn main() -> Result<()> {
     // Native USB port: host (normal) or CDC device (setup); never both.
     // The host is started below, after the node, so a target present at
     // boot finds a node to be bridged on.
-    let cdc = if setup_mode {
-        match console::UsbSerialConsole::install(
-            peripherals.usb_serial,
-            peripherals.pins.gpio19,
-            peripherals.pins.gpio20,
-        ) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                warn!("setup: USB serial console unavailable: {e:#}; use UART0");
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     let platform = Arc::new(platform::EspPlatform {
         store: store.clone(),
@@ -130,59 +121,30 @@ fn main() -> Result<()> {
         }
     }
 
-    // USB host: every serial interface of the target gets a bridge on
-    // `port + interface` the first time the device shows it.
+    // Target console on UART1 at the Grove port: TX=GPIO32, RX=GPIO33.
     if !setup_mode {
         let cfg = config.as_ref().expect("normal mode has a configuration");
         let baud = cfg.baud_rate.unwrap_or(DEFAULT_BAUD);
-        let base_port = cfg.tcp_port.unwrap_or(DEFAULT_TCP_PORT);
-        let forced = cfg
-            .usb_driver
-            .as_deref()
-            .and_then(usb_host::Driver::parse)
-            .flatten();
-        let node = platform.node().expect("node started in normal mode");
-        let host = usb_host::UsbHost::start(
+        let port = cfg.tcp_port.unwrap_or(DEFAULT_TCP_PORT);
+        let serial = uart_serial::UartSerial::new(
+            peripherals.uart1,
+            peripherals.pins.gpio32,
+            peripherals.pins.gpio33,
             baud,
-            forced,
-            base_port,
-            Box::new(move |interface, port, serial| {
-                let node = node.clone();
-                let spawned = platform::spawn_thread(
-                    &format!("bridge{port}"),
-                    8 * 1024,
-                    true,
-                    Box::new(move || {
-                        if let Err(e) = bridge::run(node, serial, port) {
-                            warn!("bridge: interface {interface} on port {port} stopped: {e:#}");
-                        }
-                    }),
-                );
-                if let Err(e) = spawned {
-                    warn!("bridge: interface {interface} on port {port} not started: {e}");
+        )
+        .context("target uart")?;
+        let _ = platform.usb.set(serial.clone());
+        let node = platform.node().expect("node started in normal mode");
+        platform::spawn_thread(
+            &format!("bridge{port}"),
+            8 * 1024,
+            true,
+            Box::new(move || {
+                if let Err(e) = bridge::run(node, serial, port) {
+                    warn!("bridge: port {port} stopped: {e:#}");
                 }
             }),
-        )
-        .context("usb host")?;
-        if platform.usb.set(host).is_err() {
-            warn!("usb: host started twice");
-        }
-    }
-
-    // Shell on the USB CDC console (setup mode): wizard runs when a terminal opens.
-    if let Some(mut cdc) = cdc {
-        let p = platform.clone();
-        std::thread::Builder::new()
-            .name("shell-usb".into())
-            .stack_size(12 * 1024)
-            .spawn(move || {
-                while !cdc.terminal_open() {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                std::thread::sleep(Duration::from_millis(300));
-                let mut sh = Shell::new(&mut cdc, p.as_ref());
-                sh.run(true, false);
-            })?;
+        )?;
     }
 
     // Shell on UART0 (always). Quiet: prompt appears after Enter.
@@ -194,7 +156,7 @@ fn main() -> Result<()> {
             .spawn(move || {
                 let mut con = console::UartConsole::new(uart);
                 let mut sh = Shell::new(&mut con, p.as_ref());
-                sh.run(false, true);
+                sh.run(setup_mode, !setup_mode);
             })?;
     }
 

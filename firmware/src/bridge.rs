@@ -10,7 +10,7 @@
 //! USB interface is claimed for the length of a session, so the host
 //! controller's pipes are shared by the ports that are in use.
 
-use crate::usb_host::{OpenError, UsbSerial};
+use crate::uart_serial::{OpenError, UartSerial as UsbSerial};
 use anyhow::{anyhow, Result};
 use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
