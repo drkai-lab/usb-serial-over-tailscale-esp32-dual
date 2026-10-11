@@ -12,6 +12,9 @@ harness = false
 
 [profile.release]
 opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 debug = true
 
 [profile.dev]
@@ -25,7 +28,7 @@ default = []
 esp-idf-svc = { version = "0.52", features = ["std", "alloc", "binstart", "critical-section"] }
 esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
-tsnode = { path = "../crates/tsnode" }
+tsnode = { path = "../crates/tsnode", features = ["lowmem"] }
 adapter-core = { path = "../crates/adapter-core" }
 log = "0.4"
 anyhow = "1"
@@ -36,4 +39,4 @@ embuild = "0.33"
 [package.metadata.esp-idf-sys]
 esp_idf_tools_install_dir = "workspace"
 # Default module variant; CI overrides this with ESP_IDF_SDKCONFIG_DEFAULTS.
-esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "variants/m5stickc-plus2.defaults"]
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "variants/wroom32-nopsram.defaults"]

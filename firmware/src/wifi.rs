@@ -67,7 +67,7 @@ impl WifiManager {
         let m = mgr.clone();
         std::thread::Builder::new()
             .name("wifi".into())
-            .stack_size(6 * 1024)
+            .stack_size(4 * 1024)
             .spawn(move || m.monitor())?;
         Ok(mgr)
     }

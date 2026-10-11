@@ -36,11 +36,11 @@ type Frame = (u8, u8, u32, Vec<u8>);
 /// What we advertise in SETTINGS_MAX_FRAME_SIZE; peers must not exceed it.
 const MAX_FRAME_SIZE: usize = 16_384;
 /// Cap on a stream's accumulated header block (HEADERS + CONTINUATION).
-const MAX_HEADER_BLOCK: usize = 64 * 1024;
+const MAX_HEADER_BLOCK: usize = crate::limits::H2_MAX_HEADER_BLOCK;
 
 const DEFAULT_WINDOW: u32 = 65_535;
 /// Window we advertise per stream and add to the connection.
-const OUR_WINDOW: u32 = 256 * 1024;
+const OUR_WINDOW: u32 = crate::limits::H2_WINDOW;
 const WINDOW_UPDATE_THRESHOLD: u32 = OUR_WINDOW / 2;
 
 #[derive(Default)]
@@ -99,14 +99,18 @@ impl H2Conn {
             settings.extend_from_slice(&val.to_be_bytes());
         }
         push_frame(&mut out, FRAME_SETTINGS, 0, 0, &settings);
-        // Grow the connection-level receive window.
-        push_frame(
-            &mut out,
-            FRAME_WINDOW_UPDATE,
-            0,
-            0,
-            &(OUR_WINDOW - DEFAULT_WINDOW).to_be_bytes(),
-        );
+        // Grow the connection-level receive window (it starts at 65535 and
+        // can only grow; with a smaller OUR_WINDOW only streams are limited).
+        #[allow(clippy::absurd_extreme_comparisons)]
+        if OUR_WINDOW > DEFAULT_WINDOW {
+            push_frame(
+                &mut out,
+                FRAME_WINDOW_UPDATE,
+                0,
+                0,
+                &OUR_WINDOW.saturating_sub(DEFAULT_WINDOW).to_be_bytes(),
+            );
+        }
         conn.write_all(&out)?;
         conn.flush()?;
         Ok(H2Conn {

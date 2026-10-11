@@ -16,6 +16,7 @@ pub mod filter;
 pub mod h2;
 pub mod http1;
 pub mod keys;
+pub mod limits;
 pub mod magicsock;
 pub mod net;
 pub mod netstack;

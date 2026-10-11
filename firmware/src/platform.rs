@@ -39,8 +39,8 @@ impl EspPlatform {
             version: crate::FIRMWARE_VERSION.into(),
             udp_port: 41641,
             local_ip: None,
-            worker_stack: 20 * 1024,
-            control_stack: 40 * 1024,
+            worker_stack: 12 * 1024,
+            control_stack: 20 * 1024,
             fallback_region_code: "tok".into(),
             spawner: Some(spawner()),
         }
@@ -166,8 +166,8 @@ impl Platform for EspPlatform {
             let (n, store) = (node.clone(), self.store.clone());
             let _ = spawn_thread(
                 "authkey-scrub",
-                6 * 1024,
-                true,
+                3 * 1024,
+                false, // writes NVS: internal stack
                 Box::new(move || {
                     while !matches!(n.status().state, TsState::Running) {
                         std::thread::sleep(Duration::from_secs(5));
@@ -280,8 +280,29 @@ pub fn last_reset() -> ResetReason {
 /// the flash cache is disabled during writes; only the control thread does.
 pub fn spawner() -> Spawner {
     Arc::new(|name: &str, stack: usize, f: Box<dyn FnOnce() + Send>| {
-        spawn_thread(name, stack, name != "control", f)
+        spawn_thread(name, stack_for(name, stack), name != "control", f)
     })
+}
+
+/// Per-thread stack sizes for the no-PSRAM build (everything is internal
+/// RAM). Sized from the Xtensa frame sizes of each thread's deepest call
+/// chain (see the report); `stack` from tsnode is the fallback.
+fn stack_for(name: &str, stack: usize) -> usize {
+    match name {
+        // Frame sizes from `entry a1, N` in the xtensa disassembly:
+        // Node::control_loop 8.4 KB + MapStream::next 4.0 KB + H2Conn::process_one
+        // 2.2 KB + serde recursion, or the /key TLS handshake (mbedTLS).
+        "control" => 24 * 1024,
+        // DerpClient::fill 4.2 KB (4 KB read buffer) + mbedTLS handshake/read.
+        n if n.starts_with("derp-") => 12 * 1024,
+        // handle_packet 0.8 KB + Peer map 1.5 KB + WireGuard handshake
+        // (x25519: ~0.8 KB + field invert 0.9 KB) + disco (crypto_box).
+        "magicsock-udp" => 10 * 1024,
+        "magicsock-tick" => 8 * 1024,
+        // NetStack::start closure 2.0 KB + smoltcp poll 0.8 KB + encapsulate.
+        "netstack" => 10 * 1024,
+        _ => stack,
+    }
 }
 
 pub fn spawn_thread(
@@ -294,7 +315,7 @@ pub fn spawn_thread(
     let cfg = ThreadSpawnConfiguration {
         stack_size: stack,
         inherit: false,
-        stack_alloc_caps: if psram {
+        stack_alloc_caps: if psram && cfg!(esp_idf_spiram) {
             MallocCap::Spiram | MallocCap::Cap8bit
         } else {
             MallocCap::Internal | MallocCap::Cap8bit

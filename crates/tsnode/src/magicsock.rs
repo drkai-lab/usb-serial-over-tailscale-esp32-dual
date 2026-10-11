@@ -33,7 +33,7 @@ const DERP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DERP_PING_IDLE: Duration = Duration::from_secs(55);
 const DERP_PING_TIMEOUT: Duration = Duration::from_secs(15);
 /// Packets queued for one DERP connection while it is (re)connecting.
-const DERP_QUEUE_LIMIT: usize = 64;
+use crate::limits::DERP_QUEUE_LIMIT;
 /// Endpoints remembered per peer (from control plus call-me-maybe).
 const MAX_ENDPOINTS: usize = 16;
 
@@ -462,6 +462,24 @@ impl MagicSock {
 
     fn derp_send(&self, st: &mut State, region: i32, dst: [u8; 32], pkt: &[u8]) {
         let mut derps = self.inner.derps.lock().unwrap();
+        if !derps.contains_key(&region) && derps.len() >= crate::limits::MAX_DERP_CONNS {
+            // Make room: close the least recently used connection that is not home.
+            let home = self.inner.home_derp.load(Ordering::Relaxed);
+            let victim = derps
+                .iter()
+                .filter(|(r, _)| **r != home)
+                .min_by_key(|(_, h)| *h.last_used.lock().unwrap())
+                .map(|(r, _)| *r);
+            match victim {
+                Some(v) => {
+                    if let Some(h) = derps.remove(&v) {
+                        let _ = h.tx.try_send(DerpCmd::Close);
+                    }
+                    debug!("magicsock: closed DERP {v} to make room for {region}");
+                }
+                None => return,
+            }
+        }
         if let std::collections::hash_map::Entry::Vacant(e) = derps.entry(region) {
             match self.spawn_derp(st, region) {
                 Some(h) => {
@@ -641,7 +659,7 @@ impl MagicSock {
     }
 
     fn udp_loop(&self) {
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; crate::limits::UDP_RECV_BUF];
         while !self.inner.shutdown.load(Ordering::Relaxed) {
             match self.inner.udp.recv_from(&mut buf) {
                 Ok((n, from)) => {

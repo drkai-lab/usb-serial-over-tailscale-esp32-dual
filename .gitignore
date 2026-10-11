@@ -9,3 +9,4 @@ hostnode-state.json
 /firmware/managed_components
 /firmware/dependencies.lock
 firmware/dist/
+/firmware/target-nopsram

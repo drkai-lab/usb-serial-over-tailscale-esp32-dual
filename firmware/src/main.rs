@@ -50,13 +50,7 @@ fn main() -> Result<()> {
     let nvs_part = EspDefaultNvsPartition::take()?;
     let store = Arc::new(nvs_store::NvsStore::open(nvs_part.clone(), "tsusb")?);
 
-    // M5StickC Plus2: HOLD (GPIO4) must go high right away or the board
-    // powers itself off when running from the battery.
-    let mut hold = esp_idf_svc::hal::gpio::PinDriver::output(peripherals.pins.gpio4)?;
-    hold.set_high()?;
-    core::mem::forget(hold);
-
-    // UART0 (GPIO1/3 on ESP32, wired to the CH9102 USB-UART) for the shell.
+    // UART0 (GPIO1/3, the DevKitC's USB-UART bridge) for the shell and logs.
     let uart = UartDriver::new(
         peripherals.uart0,
         peripherals.pins.gpio1,
@@ -66,7 +60,7 @@ fn main() -> Result<()> {
         &Default::default(),
     )?;
 
-    let mut boot_button = button::Button::new(peripherals.pins.gpio37)?;
+    let mut boot_button = button::Button::new(peripherals.pins.gpio0)?;
     let setup_requested = boot_button.held_at_boot();
 
     let config = nvs_store::load_config(store.as_ref());
@@ -107,7 +101,7 @@ fn main() -> Result<()> {
         let w = wifi.clone();
         std::thread::Builder::new()
             .name("wifi-connect".into())
-            .stack_size(6 * 1024)
+            .stack_size(5 * 1024)
             .spawn(move || {
                 if let Err(e) = w.connect_best(Duration::from_secs(30)) {
                     warn!("wifi: {e}");
@@ -121,15 +115,15 @@ fn main() -> Result<()> {
         }
     }
 
-    // Target console on UART1 at the Grove port: TX=GPIO32, RX=GPIO33.
+    // Target console on UART2: TX=GPIO17, RX=GPIO16 (free without PSRAM).
     if !setup_mode {
         let cfg = config.as_ref().expect("normal mode has a configuration");
         let baud = cfg.baud_rate.unwrap_or(DEFAULT_BAUD);
         let port = cfg.tcp_port.unwrap_or(DEFAULT_TCP_PORT);
         let serial = uart_serial::UartSerial::new(
-            peripherals.uart1,
-            peripherals.pins.gpio32,
-            peripherals.pins.gpio33,
+            peripherals.uart2,
+            peripherals.pins.gpio17,
+            peripherals.pins.gpio16,
             baud,
         )
         .context("target uart")?;
@@ -137,7 +131,7 @@ fn main() -> Result<()> {
         let node = platform.node().expect("node started in normal mode");
         platform::spawn_thread(
             &format!("bridge{port}"),
-            8 * 1024,
+            6 * 1024,
             true,
             Box::new(move || {
                 if let Err(e) = bridge::run(node, serial, port) {
@@ -147,27 +141,17 @@ fn main() -> Result<()> {
         )?;
     }
 
-    // Shell on UART0 (always). Quiet: prompt appears after Enter.
-    {
-        let p = platform.clone();
-        std::thread::Builder::new()
-            .name("shell-uart".into())
-            .stack_size(12 * 1024)
-            .spawn(move || {
-                let mut con = console::UartConsole::new(uart);
-                let mut sh = Shell::new(&mut con, p.as_ref());
-                sh.run(setup_mode, !setup_mode);
-            })?;
-    }
-
     spawn_supervisor(platform.clone());
 
     if setup_mode {
         info!("setup: open the USB serial port (or press Enter on UART0) to configure");
     }
-    loop {
-        std::thread::sleep(Duration::from_secs(60));
-    }
+    // The UART0 shell runs on the main task (CONFIG_ESP_MAIN_TASK_STACK_SIZE)
+    // instead of a thread of its own: one 12 KB stack less.
+    let mut con = console::UartConsole::new(uart);
+    let mut sh = Shell::new(&mut con, platform.as_ref());
+    sh.run(setup_mode, !setup_mode);
+    Ok(())
 }
 
 /// Periodic status log, subscribed to the Task Watchdog. Building the status
@@ -176,7 +160,7 @@ fn main() -> Result<()> {
 fn spawn_supervisor(platform: Arc<platform::EspPlatform>) {
     let _ = std::thread::Builder::new()
         .name("supervisor".into())
-        .stack_size(8 * 1024)
+        .stack_size(4 * 1024)
         .spawn(move || {
             unsafe {
                 esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut());

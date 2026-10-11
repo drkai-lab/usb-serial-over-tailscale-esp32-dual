@@ -270,6 +270,9 @@ impl MapStream {
             if let Some(msg) = self.take_message()? {
                 return Ok(Some(msg));
             }
+            if let Some(msg) = self.stream_message()? {
+                return Ok(Some(msg));
+            }
             if self.done {
                 return Ok(None);
             }
@@ -278,6 +281,33 @@ impl MapStream {
                 None => self.done = true,
             }
         }
+    }
+
+    /// A message larger than `MAP_BUFFER_MAX` is parsed while its body
+    /// arrives, so only the current HTTP/2 frame is held, not the whole JSON.
+    fn stream_message(&mut self) -> io::Result<Option<MapResponse>> {
+        if self.buf.len() < 4 {
+            return Ok(None);
+        }
+        let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        if len <= crate::limits::MAP_BUFFER_MAX || self.buf.len() >= 4 + len {
+            return Ok(None);
+        }
+        let mut pending = std::mem::take(&mut self.buf);
+        pending.drain(..4);
+        let mut rd = BodyReader {
+            h2: &mut self.h2,
+            id: self.id,
+            chunk: pending,
+            pos: 0,
+            remaining: len,
+            done: &mut self.done,
+        };
+        let msg = decode_map_reader(&mut rd)?;
+        // Bytes past this message belong to the next one.
+        let rest = rd.chunk.split_off(rd.pos);
+        self.buf = rest;
+        Ok(Some(msg))
     }
 
     fn take_message(&mut self) -> io::Result<Option<MapResponse>> {
@@ -304,7 +334,57 @@ impl MapStream {
     }
 }
 
-fn decode_map(bytes: &[u8]) -> io::Result<MapResponse> {
+/// `Read` over exactly `remaining` bytes of an HTTP/2 response body.
+struct BodyReader<'a> {
+    h2: &'a mut H2Conn,
+    id: u32,
+    chunk: Vec<u8>,
+    pos: usize,
+    remaining: usize,
+    done: &'a mut bool,
+}
+
+impl io::Read for BodyReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 || out.is_empty() {
+            return Ok(0);
+        }
+        if self.pos >= self.chunk.len() {
+            match self.h2.read_body(self.id, REQUEST_TIMEOUT)? {
+                Some(c) => {
+                    self.chunk = c;
+                    self.pos = 0;
+                }
+                None => {
+                    *self.done = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "map: stream ended inside a message",
+                    ));
+                }
+            }
+        }
+        let n = out
+            .len()
+            .min(self.chunk.len() - self.pos)
+            .min(self.remaining);
+        out[..n].copy_from_slice(&self.chunk[self.pos..self.pos + n]);
+        self.pos += n;
+        self.remaining -= n;
+        Ok(n)
+    }
+}
+
+/// Parses one map message from a reader without buffering it whole.
+pub fn decode_map_reader<R: io::Read>(r: R) -> io::Result<MapResponse> {
+    let mut de = serde_json::Deserializer::from_reader(r);
+    let msg = serde::Deserialize::deserialize(&mut de)
+        .and_then(|m| de.end().map(|_| m))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("map: bad json: {e}")))?;
+    Ok(msg)
+}
+
+pub fn decode_map(bytes: &[u8]) -> io::Result<MapResponse> {
     serde_json::from_slice(bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("map: bad json: {e}")))
 }

@@ -117,10 +117,13 @@ pub struct Node {
     #[serde(rename = "ID")]
     pub id: i64,
     #[serde(rename = "StableID")]
+    #[cfg(not(feature = "lowmem"))]
     pub stable_id: String,
     pub name: String,
+    #[cfg(not(feature = "lowmem"))]
     pub user: i64,
     pub key: String,
+    #[cfg(not(feature = "lowmem"))]
     pub key_expiry: String,
     pub machine: String,
     pub disco_key: String,
@@ -133,7 +136,10 @@ pub struct Node {
     pub derp: String,
     #[serde(rename = "HomeDERP")]
     pub home_derp: i32,
+    /// Peers' Hostinfo is not used; with `lowmem` it is skipped while parsing.
+    #[cfg(not(feature = "lowmem"))]
     pub hostinfo: Hostinfo,
+    #[cfg(not(feature = "lowmem"))]
     pub online: Option<bool>,
     pub machine_authorized: bool,
 }
@@ -195,6 +201,7 @@ pub struct DerpRegion {
     pub region_code: String,
     pub region_name: String,
     pub avoid: bool,
+    #[serde(deserialize_with = "capped::derp_nodes")]
     pub nodes: Vec<DerpNode>,
 }
 
@@ -258,7 +265,9 @@ pub struct MapResponse {
     pub node: Option<Node>,
     #[serde(rename = "DERPMap")]
     pub derp_map: Option<DerpMap>,
+    #[serde(deserialize_with = "capped::peers")]
     pub peers: Option<Vec<Node>>,
+    #[serde(deserialize_with = "capped::peers")]
     pub peers_changed: Option<Vec<Node>>,
     pub peers_removed: Option<Vec<i64>>,
     pub peers_changed_patch: Option<Vec<PeerChange>>,
@@ -274,6 +283,105 @@ pub struct MapResponse {
     pub user_profiles: Option<Vec<UserProfile>>,
     pub health: Option<Vec<String>>,
     pub control_time: Option<String>,
+}
+
+/// Sequence deserializers that keep the first N elements and skip the rest
+/// without materializing them (see `crate::limits`).
+mod capped {
+    use super::{DerpNode, Node};
+    use serde::de::{Deserialize, Deserializer, IgnoredAny, SeqAccess, Visitor};
+    use std::marker::PhantomData;
+
+    struct CapVisitor<T> {
+        max: usize,
+        what: &'static str,
+        _t: PhantomData<T>,
+    }
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for CapVisitor<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.max).min(16));
+            let mut dropped = 0usize;
+            while out.len() < self.max {
+                match seq.next_element::<T>()? {
+                    Some(v) => out.push(v),
+                    None => return Ok(out),
+                }
+            }
+            while seq.next_element::<IgnoredAny>()?.is_some() {
+                dropped += 1;
+            }
+            if dropped > 0 {
+                log::warn!("map: kept {} {}, ignored {dropped}", out.len(), self.what);
+            }
+            if out.capacity() > out.len() {
+                out.shrink_to_fit();
+            }
+            Ok(out)
+        }
+    }
+
+    fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        d: D,
+        max: usize,
+        what: &'static str,
+    ) -> Result<Vec<T>, D::Error> {
+        d.deserialize_seq(CapVisitor {
+            max,
+            what,
+            _t: PhantomData,
+        })
+    }
+
+    pub fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Node>>, D::Error> {
+        struct OptVisitor;
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<Vec<Node>>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("null or a sequence of nodes")
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+                capped(d, crate::limits::MAX_PEERS, "peers").map(Some)
+            }
+        }
+        d.deserialize_option(OptVisitor)
+    }
+
+    pub fn derp_nodes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<DerpNode>, D::Error> {
+        let v: Option<Vec<DerpNode>> = {
+            struct OptVisitor;
+            impl<'de> Visitor<'de> for OptVisitor {
+                type Value = Option<Vec<DerpNode>>;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("null or a sequence of DERP nodes")
+                }
+                fn visit_none<E>(self) -> Result<Self::Value, E> {
+                    Ok(None)
+                }
+                fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                    Ok(None)
+                }
+                fn visit_some<D2: Deserializer<'de>>(
+                    self,
+                    d: D2,
+                ) -> Result<Self::Value, D2::Error> {
+                    capped(d, crate::limits::MAX_DERP_NODES_PER_REGION, "DERP nodes").map(Some)
+                }
+            }
+            d.deserialize_option(OptVisitor)?
+        };
+        Ok(v.unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

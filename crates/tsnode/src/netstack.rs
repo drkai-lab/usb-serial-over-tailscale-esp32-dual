@@ -13,12 +13,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const RX_BUF: usize = 8 * 1024;
-const TX_BUF: usize = 8 * 1024;
-const USER_TX_LIMIT: usize = 32 * 1024;
+use crate::limits::{TCP_RX_BUF as RX_BUF, TCP_TX_BUF as TX_BUF, USER_RX_LIMIT, USER_TX_LIMIT};
 /// Bytes buffered for a reader that is not keeping up; beyond this the
 /// stack stops draining the socket and TCP flow control holds the sender.
-const USER_RX_LIMIT: usize = 16 * 1024;
 /// A peer that stops acknowledging (sleeping laptop, vanished NAT mapping)
 /// is dropped after this long so the bridge becomes free again.
 const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(120);
@@ -640,7 +637,7 @@ mod tests {
 
         let listener = b.listen(2300);
         let client = a.connect("100.64.0.2:2300".parse().unwrap());
-        let server = listener.accept(Duration::from_secs(5)).expect("accept");
+        let server = Arc::new(listener.accept(Duration::from_secs(5)).expect("accept"));
         assert_eq!(
             server.peer_addr().ip(),
             "100.64.0.1".parse::<IpAddr>().unwrap()
@@ -652,7 +649,12 @@ mod tests {
         assert_eq!(&buf[..n], b"hello over smoltcp");
 
         let big: Vec<u8> = (0..50_000u32).map(|i| i as u8).collect();
-        server.write_all(&big).unwrap();
+        // Written from another thread: with the `lowmem` limits the queues
+        // hold less than 50 KB, so the writer blocks until the reader drains.
+        let writer = {
+            let (server, big) = (server.clone(), big.clone());
+            std::thread::spawn(move || server.write_all(&big).unwrap())
+        };
         let mut got = Vec::new();
         while got.len() < big.len() {
             let n = client.read(&mut buf, Duration::from_secs(5)).unwrap();
@@ -660,6 +662,7 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, big);
+        writer.join().unwrap();
 
         client.close();
         let n = server.read(&mut buf, Duration::from_secs(5)).unwrap();

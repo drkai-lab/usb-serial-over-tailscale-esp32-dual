@@ -28,7 +28,7 @@ pub fn run(node: Node, serial: UsbSerial, port: u16) -> Result<()> {
     let (tx, rx) = mpsc::sync_channel::<TcpStream>(1);
     crate::platform::spawn_thread(
         &format!("bridge-accept{port}"),
-        6 * 1024,
+        3 * 1024,
         true,
         Box::new(move || loop {
             let Some(conn) = listener.accept(Duration::from_secs(1)) else {
@@ -78,7 +78,7 @@ fn serve(serial: &UsbSerial, conn: TcpStream, port: u16) -> Result<()> {
     let rx_done2 = rx_done.clone();
     crate::platform::spawn_thread(
         &format!("bridge-rx{port}"),
-        6 * 1024,
+        4 * 1024,
         true,
         Box::new(move || {
             let mut buf = [0u8; 512];

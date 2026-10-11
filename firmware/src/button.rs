@@ -1,7 +1,7 @@
 //! BOOT button (GPIO0, active low) used to request Setup Mode.
 
 use anyhow::Result;
-use esp_idf_svc::hal::gpio::{Gpio37, Input, PinDriver, Pull};
+use esp_idf_svc::hal::gpio::{Gpio0, Input, PinDriver, Pull};
 use std::time::{Duration, Instant};
 
 pub struct Button {
@@ -9,9 +9,8 @@ pub struct Button {
 }
 
 impl Button {
-    pub fn new(gpio0: Gpio37<'static>) -> Result<Self> {
-        // GPIO37 is input-only with no internal pull; Button A has an external one (unverified).
-        let pin = PinDriver::input(gpio0, Pull::Floating)?;
+    pub fn new(gpio0: Gpio0<'static>) -> Result<Self> {
+        let pin = PinDriver::input(gpio0, Pull::Up)?;
         Ok(Button { pin })
     }
 
